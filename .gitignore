@@ -9,3 +9,6 @@ target/
 *.subs.c
 *.sdb
 .idea
+
+NOTES.md
+
