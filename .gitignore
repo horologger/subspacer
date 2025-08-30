@@ -11,4 +11,4 @@ target/
 .idea
 
 NOTES.md
-
+*.req.json
