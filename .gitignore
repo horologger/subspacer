@@ -12,3 +12,4 @@ target/
 
 NOTES.md
 *.req.json
+chain.json
