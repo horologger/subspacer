@@ -12,4 +12,8 @@ target/
 
 NOTES.md
 *.req.json
+*.cert.json
+chain.json
+
+data/
 chain.json

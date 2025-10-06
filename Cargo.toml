@@ -9,3 +9,7 @@ opt-level = 3
 [profile.release]
 debug = 1
 lto = true
+
+[patch.crates-io]
+# RISC Zero SHA-256 accelerator patch to ensure compatible sha2 version across host and guest
+sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.6-risczero.0" }

@@ -16,7 +16,7 @@ risc0-zkvm = { version = "^3.0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = "1.0"
 bitcoin = { version = "0.32.2", features = ["base64", "serde", "rand-std"] }
-spacedb = { git = "https://github.com/spacesprotocol/spacedb.git", branch = "main" }
+spacedb = { git = "https://github.com/spacesprotocol/spacedb.git", tag = "v0.0.7" }
 spaces_protocol = { git = "https://github.com/spacesprotocol/spaces", features = ["std"] }
 program = { path = "../program" }
 clap = { version = "4.5.32", features = ["derive", "cargo"] }
