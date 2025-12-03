@@ -21,6 +21,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Request(a) => app.cmd_create(a)?,
+        Commands::KeystoreBackup(a) => app.cmd_keystore_backup(a)?,
     }
     Ok(())
 }

@@ -1,4 +1,5 @@
 use std::{fs, io};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -77,6 +78,10 @@ pub enum Commands {
     /// Certificate operations (issue, verify, …)
     #[command(name = "cert", subcommand)]
     Cert(CertCmd),
+
+    /// Backup keystore (includes xprv)
+    #[command(name = "keystore-backup")]
+    KeystoreBackup(KeystoreBackupArgs),
 }
 
 #[derive(Subcommand)]
@@ -141,6 +146,37 @@ pub struct VerifyArgs {
     #[arg(long)]
     root: Option<PathBuf>,
 
+}
+
+#[derive(clap::Args)]
+#[command(author, version, about, long_about = None)]
+pub struct KeystoreBackupArgs {
+    /// Input keystore file
+    #[arg(short, long)]
+    pub input: PathBuf,
+
+    /// Output backup file (default: <input>.backup.json)
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Extended private key (xprv) to include in backup
+    #[arg(long)]
+    pub xprv: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct KeystoreHandle {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cert: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Keystore {
+    xpub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    xprv: Option<String>,
+    handles: HashMap<String, KeystoreHandle>,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone)]
@@ -917,6 +953,57 @@ impl App {
             hex::encode(final_root)
         );
         println!("   ⚠️ Make sure the root, and history hashes match!");
+        Ok(())
+    }
+
+    pub fn cmd_keystore_backup(&self, args: KeystoreBackupArgs) -> anyhow::Result<()> {
+        // Read the input keystore file
+        let keystore_bytes = fs::read(&args.input)
+            .with_context(|| format!("reading keystore file {}", args.input.display()))?;
+        
+        let mut keystore: Keystore = serde_json::from_slice(&keystore_bytes)
+            .map_err(|e| anyhow!("parse keystore {}: {}", args.input.display(), e))?;
+
+        // Set xprv if provided via command line
+        if let Some(xprv) = args.xprv {
+            keystore.xprv = Some(xprv);
+        }
+
+        // If xprv is still None, warn but continue
+        if keystore.xprv.is_none() {
+            eprintln!("⚠️  Warning: No xprv found in keystore. Backup will not include extended private key.");
+            eprintln!("   Use --xprv <xprv> to include it in the backup.");
+        }
+
+        // Determine output path
+        let output_path = if let Some(ref output) = args.output {
+            output.clone()
+        } else {
+            let mut output = args.input.clone();
+            output.set_file_name(
+                format!("{}.backup.json", 
+                    args.input.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("keystore")
+                )
+            );
+            output
+        };
+
+        // Write backup with xprv included
+        let backup_json = serde_json::to_string_pretty(&keystore)
+            .map_err(|e| anyhow!("serialize keystore: {}", e))?;
+        fs::write(&output_path, backup_json)
+            .with_context(|| format!("writing backup to {}", output_path.display()))?;
+
+        println!("✔ Keystore backup created");
+        println!("   → {}", output_path.display());
+        if keystore.xprv.is_some() {
+            println!("   → Includes xprv");
+        } else {
+            println!("   → Warning: xprv not included");
+        }
+
         Ok(())
     }
 }
