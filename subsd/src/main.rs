@@ -13,6 +13,8 @@ use axum::{
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -23,6 +25,7 @@ struct Config {
     rpc_bind: String,
     rpc_port: u16,
     rpc_url: String,
+    list_subspaces: bool,
 }
 
 impl Config {
@@ -44,13 +47,19 @@ impl Config {
                 .context("SUBSD_RPC_PORT must be a valid port number")?,
             rpc_url: env::var("SUBSD_RPC_URL")
                 .unwrap_or_else(|_| format!("http://127.0.0.1:7244")),
+            list_subspaces: env::var("SUBSD_LIST_SUBSPACES")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .unwrap_or(false),
         })
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 struct HealthResponse {
+    /// Status of the server
     status: String,
+    /// Version of the server
     version: String,
 }
 
@@ -63,12 +72,17 @@ struct CertFile {
     _other: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
 struct SearchCertFile {
+    /// Full handle (e.g., "user@did")
     handle: String,
+    /// Script public key
     script_pubkey: String,
+    /// Anchor hash
     anchor: String,
+    /// Status compared to root anchor: "matches root anchor" or "not in most recent root anchor"
     status: String,
+    /// On-chain commitment status: "commitment is on chain" or "this handle does not appear in any on chain commitment"
     commitment: String,
 }
 
@@ -96,14 +110,95 @@ struct RpcResponse {
     id: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 struct SpaceInfo {
+    /// Handle of the space (e.g., "self@did")
     handle: String,
+    /// Anchor hash of the space
     anchor: String,
+    /// Number of certificate requests
     certificate_requests: usize,
+    /// Number of issued certificates
     issued_certificates: usize,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ParamInfo {
+    name: String,
+    #[serde(rename = "type")]
+    param_type: String,
+    required: bool,
+    description: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct EndpointInfo {
+    path: String,
+    method: String,
+    description: String,
+    path_params: Vec<ParamInfo>,
+    query_params: Vec<ParamInfo>,
+    response_formats: Vec<String>,
+    example_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+struct DiscoveryResponse {
+    /// Server version
+    version: String,
+    /// Server name
+    server_name: String,
+    /// Base URL of the server
+    base_url: String,
+    /// List of available endpoints
+    endpoints: Vec<EndpointInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
+struct ErrorResponse {
+    /// Error message
+    error: String,
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        healthcheck,
+        get_space_info,
+        get_subspace_cert,
+        discover_endpoints
+    ),
+    components(schemas(
+        HealthResponse,
+        SpaceInfo,
+        SearchCertFile,
+        DiscoveryResponse,
+        ErrorResponse
+    )),
+    tags(
+        (name = "health", description = "Health check endpoints"),
+        (name = "spaces", description = "Space management endpoints"),
+        (name = "discovery", description = "API discovery endpoints")
+    ),
+    info(
+        title = "Subsd API",
+        description = "RPC server for managing spaces and certificates",
+        version = "0.1.0"
+    ),
+    servers(
+        (url = "http://127.0.0.1:7244", description = "Local development server")
+    )
+)]
+struct ApiDoc;
+
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Server is healthy", body = HealthResponse)
+    )
+)]
 async fn healthcheck(_state: State<Config>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -192,6 +287,13 @@ async fn list_spaces(state: State<Config>) -> impl IntoResponse {
         li:last-child {{
             border-bottom: none;
         }}
+        li a {{
+            color: #007bff;
+            text-decoration: none;
+        }}
+        li a:hover {{
+            text-decoration: underline;
+        }}
         .count {{
             color: #666;
             font-size: 0.9em;
@@ -209,7 +311,7 @@ async fn list_spaces(state: State<Config>) -> impl IntoResponse {
 </html>"#,
         folders
             .iter()
-            .map(|f| format!("        <li>{}</li>", html_escape(f)))
+            .map(|f| format!("        <li><a href=\"/spaces/{}\">{}</a></li>", html_escape(f), html_escape(f)))
             .collect::<Vec<_>>()
             .join("\n"),
         folders.len()
@@ -222,6 +324,170 @@ async fn list_spaces(state: State<Config>) -> impl IntoResponse {
 struct FormatQuery {
     format: Option<String>,
 }
+
+#[utoipa::path(
+    get,
+    path = "/api",
+    tag = "discovery",
+    params(
+        ("format" = Option<String>, Query, description = "Response format: 'json' for JSON, omit for HTML")
+    ),
+    responses(
+        (status = 200, description = "API discovery information", body = DiscoveryResponse, content_type = "application/json"),
+        (status = 200, description = "API discovery information (HTML)", content_type = "text/html")
+    )
+)]
+async fn discover_endpoints(
+    headers: HeaderMap,
+    Query(params): Query<FormatQuery>,
+    State(config): State<Config>,
+) -> impl IntoResponse {
+    let wants_json = params.format.as_deref() == Some("json")
+        || headers
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.contains("application/json"))
+            .unwrap_or(false);
+
+    let base_url = config.rpc_url.clone();
+    let endpoints = vec![
+        EndpointInfo {
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            description: "List all spaces (folders) found in the data directory".to_string(),
+            path_params: vec![],
+            query_params: vec![],
+            response_formats: vec!["html".to_string()],
+            example_path: Some("/".to_string()),
+        },
+        EndpointInfo {
+            path: "/health".to_string(),
+            method: "GET".to_string(),
+            description: "Health check endpoint".to_string(),
+            path_params: vec![],
+            query_params: vec![],
+            response_formats: vec!["json".to_string()],
+            example_path: Some("/health".to_string()),
+        },
+        EndpointInfo {
+            path: "/spaces/{space_name}".to_string(),
+            method: "GET".to_string(),
+            description: "Get information about a specific space, including handle, anchor, certificate requests count, and issued certificates count".to_string(),
+            path_params: vec![ParamInfo {
+                name: "space_name".to_string(),
+                param_type: "string".to_string(),
+                required: true,
+                description: "Name of the space (folder name without leading '@')".to_string(),
+            }],
+            query_params: vec![ParamInfo {
+                name: "format".to_string(),
+                param_type: "string".to_string(),
+                required: false,
+                description: "Response format: 'json' for JSON, omit for HTML".to_string(),
+            }],
+            response_formats: vec!["html".to_string(), "json".to_string()],
+            example_path: Some("/spaces/did".to_string()),
+        },
+        EndpointInfo {
+            path: "/spaces/{space_name}/{subspace}".to_string(),
+            method: "GET".to_string(),
+            description: "Get certificate information for a subspace, including handle, script_pubkey, anchor, anchor status comparison, and on-chain commitment verification".to_string(),
+            path_params: vec![
+                ParamInfo {
+                    name: "space_name".to_string(),
+                    param_type: "string".to_string(),
+                    required: true,
+                    description: "Name of the space (folder name without leading '@')".to_string(),
+                },
+                ParamInfo {
+                    name: "subspace".to_string(),
+                    param_type: "string".to_string(),
+                    required: true,
+                    description: "Subspace name (part before '@' in handle, e.g., 'user' from 'user@did')".to_string(),
+                },
+            ],
+            query_params: vec![ParamInfo {
+                name: "format".to_string(),
+                param_type: "string".to_string(),
+                required: false,
+                description: "Response format: 'json' for JSON, omit for HTML".to_string(),
+            }],
+            response_formats: vec!["html".to_string(), "json".to_string()],
+            example_path: Some("/spaces/did/user".to_string()),
+        },
+        EndpointInfo {
+            path: "/api".to_string(),
+            method: "GET".to_string(),
+            description: "API discovery endpoint - returns this list of available endpoints".to_string(),
+            path_params: vec![],
+            query_params: vec![ParamInfo {
+                name: "format".to_string(),
+                param_type: "string".to_string(),
+                required: false,
+                description: "Response format: 'json' for JSON, omit for HTML".to_string(),
+            }],
+            response_formats: vec!["html".to_string(), "json".to_string()],
+            example_path: Some("/api".to_string()),
+        },
+    ];
+
+    let discovery = DiscoveryResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        server_name: "subsd".to_string(),
+        base_url,
+        endpoints,
+    };
+
+    if wants_json {
+        Json(discovery).into_response()
+    } else {
+        let endpoints_html: String = discovery.endpoints.iter().map(|ep| {
+            let path_params_html = if ep.path_params.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"<div class="params"><strong>Path Parameters:</strong><ul>{}</ul></div>"#,
+                    ep.path_params.iter().map(|p| format!(
+                        "<li><code>{}</code> ({}) - {} {}</li>",
+                        html_escape(&p.name), html_escape(&p.param_type),
+                        if p.required { "<strong>required</strong>" } else { "optional" },
+                        html_escape(&p.description)
+                    )).collect::<Vec<_>>().join("")
+                )
+            };
+            let query_params_html = if ep.query_params.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"<div class="params"><strong>Query Parameters:</strong><ul>{}</ul></div>"#,
+                    ep.query_params.iter().map(|p| format!(
+                        "<li><code>{}</code> ({}) - {} {}</li>",
+                        html_escape(&p.name), html_escape(&p.param_type),
+                        if p.required { "<strong>required</strong>" } else { "optional" },
+                        html_escape(&p.description)
+                    )).collect::<Vec<_>>().join("")
+                )
+            };
+            let example_html = ep.example_path.as_ref().map(|ex| {
+                format!(r#"<div class="example"><strong>Example:</strong> <code>{}</code></div>"#, html_escape(ex))
+            }).unwrap_or_default();
+            format!(
+                r#"<div class="endpoint"><div class="endpoint-header"><span class="method">{}</span><span class="path">{}</span></div><div class="description">{}</div><div class="formats"><strong>Response Formats:</strong> {}</div>{}{}{}</div>"#,
+                html_escape(&ep.method), html_escape(&ep.path), html_escape(&ep.description),
+                ep.response_formats.join(", "), path_params_html, query_params_html, example_html
+            )
+        }).collect::<Vec<_>>().join("
+");
+        let html = format!(
+            r#"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>API Discovery - Subsd</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:1000px;margin:50px auto;padding:20px;background-color:#f5f5f5}}h1{{color:#333;border-bottom:3px solid #333;padding-bottom:10px}}.info{{background-color:white;border:1px solid #ddd;border-radius:4px;padding:20px;margin-bottom:20px}}.endpoint{{background-color:white;border:1px solid #ddd;border-radius:4px;padding:20px;margin-bottom:15px}}.endpoint-header{{display:flex;align-items:center;gap:10px;margin-bottom:10px}}.method{{background-color:#007bff;color:white;padding:4px 8px;border-radius:3px;font-weight:bold;font-size:0.9em}}.path{{font-family:monospace;font-size:1.1em;color:#333}}.description{{color:#666;margin-bottom:10px}}.formats{{color:#666;font-size:0.9em;margin-bottom:10px}}.params{{margin-top:10px;margin-bottom:10px}}.params ul{{margin:5px 0;padding-left:20px}}.params li{{margin:5px 0}}.params code{{background-color:#f4f4f4;padding:2px 6px;border-radius:3px;font-family:monospace}}.example{{margin-top:10px;padding:10px;background-color:#f8f9fa;border-left:3px solid #007bff}}.example code{{font-family:monospace;color:#007bff}}</style></head><body><h1>Subsd API Discovery</h1><div class="info"><p><strong>Server:</strong> {}</p><p><strong>Version:</strong> {}</p><p><strong>Base URL:</strong> <code>{}</code></p></div><h2>Available Endpoints</h2>{}</body></html>"#,
+            html_escape(&discovery.server_name), html_escape(&discovery.version),
+            html_escape(&discovery.base_url), endpoints_html
+        );
+        Html(html).into_response()
+    }
+}
+
+
 
 async fn check_commitment_on_chain(
     config: &Config,
@@ -312,6 +578,21 @@ async fn check_commitment_on_chain(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/spaces/{space_name}/{subspace}",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space (folder name without leading '@')"),
+        ("subspace" = String, Path, description = "Subspace name (part before '@' in handle, e.g., 'user' from 'user@did')"),
+        ("format" = Option<String>, Query, description = "Response format: 'json' for JSON, omit for HTML")
+    ),
+    responses(
+        (status = 200, description = "Subspace certificate information", body = SearchCertFile, content_type = "application/json"),
+        (status = 200, description = "Subspace certificate information (HTML)", content_type = "text/html"),
+        (status = 404, description = "Certificate not found or request exists but not issued", body = ErrorResponse)
+    )
+)]
 async fn get_subspace_cert(
     PathExtractor((space_name, subspace)): PathExtractor<(String, String)>,
     headers: HeaderMap,
@@ -564,9 +845,21 @@ async fn get_subspace_cert(
             color: #721c24;
             border: 1px solid #f5c6cb;
         }}
+        .back-link {{
+            margin-bottom: 15px;
+        }}
+        .back-link a {{
+            color: #007bff;
+            text-decoration: none;
+            font-size: 0.9em;
+        }}
+        .back-link a:hover {{
+            text-decoration: underline;
+        }}
     </style>
 </head>
 <body>
+    <div class="back-link"><a href="/spaces/{}">← Back to Space: {}</a></div>
     <h1>Subspace: {}@{}</h1>
     <div class="info">
         <div class="field">
@@ -591,6 +884,8 @@ async fn get_subspace_cert(
 </body>
 </html>"#,
             html_escape(&subspace),
+            html_escape(&space_name),
+            html_escape(&space_name),
             html_escape(&space_name),
             html_escape(&subspace),
             html_escape(&space_name),
@@ -618,6 +913,20 @@ async fn get_subspace_cert(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/spaces/{space_name}",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space (folder name without leading '@')"),
+        ("format" = Option<String>, Query, description = "Response format: 'json' for JSON, omit for HTML")
+    ),
+    responses(
+        (status = 200, description = "Space information", body = SpaceInfo, content_type = "application/json"),
+        (status = 200, description = "Space information (HTML)", content_type = "text/html"),
+        (status = 404, description = "Space not found", body = ErrorResponse)
+    )
+)]
 async fn get_space_info(
     PathExtractor(space_name): PathExtractor<String>,
     headers: HeaderMap,
@@ -712,6 +1021,7 @@ async fn get_space_info(
     // Count certificate requests (*@<space_name>.req.json)
     let mut certificate_requests = 0;
     let mut issued_certificates = 0;
+    let mut subspaces: Vec<(String, bool)> = Vec::new(); // (subspace_name, has_cert)
     
     match fs::read_dir(&space_dir) {
         Ok(entries) => {
@@ -723,6 +1033,16 @@ async fn get_space_info(
                             // Count certificate requests: *@<space_name>.req.json
                             if file_name.ends_with(&format!("@{}.req.json", space_name)) {
                                 certificate_requests += 1;
+                                
+                                // Extract subspace name if listing is enabled
+                                if config.list_subspaces {
+                                    if let Some(subspace_name) = file_name.strip_suffix(&format!("@{}.req.json", space_name)) {
+                                        let cert_file_name = format!("{}@{}.cert.json", subspace_name, space_name);
+                                        let cert_path = space_dir.join(&cert_file_name);
+                                        let has_cert = cert_path.exists();
+                                        subspaces.push((subspace_name.to_string(), has_cert));
+                                    }
+                                }
                             }
                             // Count issued certificates: *@<space_name>.cert.json (but exclude @<space_name>.cert.json itself)
                             if file_name.ends_with(&format!("@{}.cert.json", space_name))
@@ -738,6 +1058,11 @@ async fn get_space_info(
         Err(e) => {
             warn!("Failed to read space directory {}: {}", space_dir.display(), e);
         }
+    }
+    
+    // Sort subspaces by name
+    if config.list_subspaces {
+        subspaces.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
     let space_info = SpaceInfo {
@@ -808,9 +1133,49 @@ async fn get_space_info(
             color: #333;
             font-size: 1.2em;
         }}
+        .back-link {{
+            margin-bottom: 15px;
+        }}
+        .back-link a {{
+            color: #007bff;
+            text-decoration: none;
+            font-size: 0.9em;
+        }}
+        .back-link a:hover {{
+            text-decoration: underline;
+        }}
+        .subspaces {{
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }}
+        .subspaces h3 {{
+            color: #666;
+            font-size: 1em;
+            margin-bottom: 10px;
+        }}
+        .subspaces ul {{
+            list-style-type: none;
+            padding: 0;
+            margin: 0;
+        }}
+        .subspaces li {{
+            padding: 5px 0;
+        }}
+        .subspaces li a {{
+            color: #007bff;
+            text-decoration: none;
+        }}
+        .subspaces li a:hover {{
+            text-decoration: underline;
+        }}
+        .subspaces li .no-link {{
+            color: #666;
+        }}
     </style>
 </head>
 <body>
+    <div class="back-link"><a href="/">← Back to Spaces List</a></div>
     <h1>Space: {}</h1>
     <div class="info">
         <div class="field">
@@ -831,6 +1196,7 @@ async fn get_space_info(
                 <span class="stat-value">{}</span>
             </div>
         </div>
+        {}
     </div>
 </body>
 </html>"#,
@@ -839,7 +1205,39 @@ async fn get_space_info(
             html_escape(&cert.handle),
             html_escape(&cert.anchor),
             certificate_requests,
-            issued_certificates
+            issued_certificates,
+            if config.list_subspaces && !subspaces.is_empty() {
+                let subspaces_html: String = subspaces
+                    .iter()
+                    .map(|(subspace_name, has_cert)| {
+                        if *has_cert {
+                            format!(
+                                "<li><a href=\"/spaces/{}/{}\">{}</a></li>",
+                                html_escape(&space_name),
+                                html_escape(subspace_name),
+                                html_escape(subspace_name)
+                            )
+                        } else {
+                            format!(
+                                "<li><span class=\"no-link\">{}</span></li>",
+                                html_escape(subspace_name)
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    r#"<div class="subspaces">
+            <h3>Subspaces:</h3>
+            <ul>
+{}
+            </ul>
+        </div>"#,
+                    subspaces_html
+                )
+            } else {
+                String::new()
+            }
         );
         Html(html).into_response()
     }
@@ -872,8 +1270,13 @@ async fn main() -> Result<()> {
 
     // Build the application router
     let app = Router::new()
+        .merge(
+            SwaggerUi::new("/docs")
+                .url("/openapi.json", ApiDoc::openapi())
+        )
         .route("/", get(list_spaces))
         .route("/health", get(healthcheck))
+        .route("/api", get(discover_endpoints))
         .route("/spaces/:space_name", get(get_space_info))
         .route("/spaces/:space_name/:subspace", get(get_subspace_cert))
         .with_state(config.clone());

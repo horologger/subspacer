@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <space_name>" >&2
+    exit 1
+fi
+
+SPACE_NAME="$1"
+SPACE_DIR="${SPACE_NAME}"
+
+# Create the space directory if it doesn't exist
+mkdir -p "$SPACE_DIR"
+
+# Change to the space directory
+cd "$SPACE_DIR"
+
+# Step 1: Create admin request
+echo "subs request \"admin@${SPACE_NAME}\""
+subs request "admin@${SPACE_NAME}"
+
+# Step 2: Stage requests in current directory
+echo "subs add ."
+subs add .
+
+# Step 3: Commit batch
+echo "subs commit"
+subs commit
+
+# Step 1: Create user request
+echo "subs request \"user@${SPACE_NAME}\""
+subs request "user@${SPACE_NAME}"
+
+# Step 2: Stage requests in current directory
+echo "subs add ."
+subs add .
+
+# Step 3: Commit batch
+echo "subs commit"
+subs commit
+
+# Step 4: Prove steps
+echo "subs prove"
+subs prove
+
+# Step 5: Issue admin certificate
+echo "subs cert issue \"admin@${SPACE_NAME}\""
+subs cert issue "admin@${SPACE_NAME}"
+
+# Step 6: Verify admin certificate against root
+echo "subs cert verify --root=\"@${SPACE_NAME}.cert.json\" \"admin@${SPACE_NAME}.cert.json\""
+subs cert verify --root="@${SPACE_NAME}.cert.json" "admin@${SPACE_NAME}.cert.json"
+
+echo "Space '${SPACE_NAME}' initialized successfully."
+
