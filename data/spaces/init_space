@@ -52,5 +52,9 @@ subs cert issue "admin@${SPACE_NAME}"
 echo "subs cert verify --root=\"@${SPACE_NAME}.cert.json\" \"admin@${SPACE_NAME}.cert.json\""
 subs cert verify --root="@${SPACE_NAME}.cert.json" "admin@${SPACE_NAME}.cert.json"
 
+echo "subs cert issue \"user@${SPACE_NAME}\""
+subs cert issue "user@${SPACE_NAME}"
+
+
 echo "Space '${SPACE_NAME}' initialized successfully."
 

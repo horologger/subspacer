@@ -1,0 +1,9 @@
+{
+  "handle": "user@did",
+  "script_pubkey": "5120aca68227f4d3117dfc5e5ebd844265cc528bdcc18c11431aab106d0b5611ff2b",
+  "anchor": "8f81d8c22f652aa7e20006bcebcbaac21e8dce448639a78b277f265559563584",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo7AypeH1YNHXEX4Oyl04oCKBK8h7tdub06XQSOYjmzgAiUSCspoIn9NMRffxeXr2EQmXMUovcwYwRQxqrEG0LVhH/KwIDTPfLNUz9hFoh8c2o6PCXlPPyWf4wvgN8GM7q+ZeDbw=="
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "id": "e946effe1d30ac95fbbb9cc6e1eae703268de715475b9c139232625474565123",
+  "pubkey": "25620c8e616d0d4edfd7ddf826e308b7b2b90e0be95c509285ce0f67c55bff25",
+  "created_at": 1762287635,
+  "kind": 1,
+  "tags": [],
+  "content": "Go to outer space.",
+  "sig": "2b0c2b39cf526c8e9db9cd4e688fbf6bb0c45c39f20c135a05e1d7f30cf15c0e99cd9b51a951bab3a76828a2ecfd55c469decc0ff285c7c1900c48d48753c3e6",
+  "pub": "25620c8e616d0d4edfd7ddf826e308b7b2b90e0be95c509285ce0f67c55bff25"
+}

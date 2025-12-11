@@ -1,0 +1,9 @@
+{
+  "handle": "user@usdt",
+  "script_pubkey": "512089ff559d92a04e2d335dd4160e519b30142a4c8eb7deb058de35641fdd3cd461",
+  "anchor": "f4a29d5d1b3b9b65ed142a545b1ec83dbfa0f1492a1432605390e867a8f7cc41",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo7AypeH1YNHXEX4Oyl04oCKBK8h7tdub06XQSOYjmzgAiUSCJ/1WdkqBOLTNd1BYOUZswFCpMjrfesFjeNWQf3TzUYQKC9UTMzU+LOdfy0YisYDuJxl9AbS/HFeKlv3q91Nr6VQ=="
+  }
+}

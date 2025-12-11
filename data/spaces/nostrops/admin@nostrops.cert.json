@@ -1,0 +1,9 @@
+{
+  "handle": "admin@nostrops",
+  "script_pubkey": "51201d6b8f8b484bc533cfc5c6348a78b49e653289b092996bc659451181dddd5339",
+  "anchor": "7cd033f4acc41d9a2f975d21bf582a3fa1717da530b6cb089cb2ac7d96100ff1",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDq9OWGZtG7v3OJHoJPUgidewFVv0VRiatrt8qlrGqdQDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSAda4+LSEvFM8/FxjSKeLSeZTKJsJKZa8ZZRRGB3d1TOQ=="
+  }
+}

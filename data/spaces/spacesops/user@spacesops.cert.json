@@ -1,0 +1,9 @@
+{
+  "handle": "user@spacesops",
+  "script_pubkey": "5120cf8db058d1a3ac0bf7a79840e66bdcc750885e69b25386110099a01bf8be893e",
+  "anchor": "ea8922cf26a0e8dee93eea346ee7810a2b5927098f4aa5f71db6664e4574fa8f",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo7AypeH1YNHXEX4Oyl04oCKBK8h7tdub06XQSOYjmzgAiUSDPjbBY0aOsC/enmEDma9zHUIheabJThhEAmaAb+L6JPgJ18mrM4fR+1rnyRu+o2znzbhGL1ZbV5sQmK5ThBZQ5mA=="
+  }
+}

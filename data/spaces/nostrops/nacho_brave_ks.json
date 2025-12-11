@@ -1,0 +1,9 @@
+{
+  "xpub": "xpub661MyMwAqRbcEbKrWrUEgKb3UL6nAkVQ3f1mjhPAFZyehJzbkirvEAbEV93UBY6y4DWoBpig6F9i46ju4pwGD8gqKTRFj6QwvQG2jxpdTMg",
+  "handles": {
+    "vacuum@nostrops": {
+      "path": "m/86'/1'/0'/0/0"
+    }
+  },
+  "xprv": "xprv9s21ZrQH143K27FPQpwEKBeJvJGHmHmYgS6AwJyYhESfpWfTDBYfgNGkdsNQPfXks9R9f2nS2aTDBPd65qRosT5YL78Qutq6aPtGtQYAbd7"
+}

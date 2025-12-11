@@ -1,0 +1,9 @@
+{
+  "handle": "admin@did",
+  "script_pubkey": "51204294c843b3edf47240d6b4532372bbcacf33946a8b94f22a98a25099955dbd90",
+  "anchor": "8f81d8c22f652aa7e20006bcebcbaac21e8dce448639a78b277f265559563584",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDYP+iQ3ehcQSrnXWVU1ratUDLQSvmFFz8RSgZDJWw2wDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSBClMhDs+30ckDWtFMjcrvKzzOUaouU8iqYolCZlV29kA=="
+  }
+}

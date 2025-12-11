@@ -1,0 +1,9 @@
+{
+  "handle": "user@nostrops",
+  "script_pubkey": "5120e44aeb9ba1fbae716ffa67533ad23e9e8bbbb14cf61d4d46469a2332bd10d29c",
+  "anchor": "7cd033f4acc41d9a2f975d21bf582a3fa1717da530b6cb089cb2ac7d96100ff1",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo7AypeH1YNHXEX4Oyl04oCKBK8h7tdub06XQSOYjmzgAiUSDkSuubofuucW/6Z1M60j6ei7uxTPYdTUZGmiMyvRDSnAL7ae4ZjwOYNvHLZJlZmXWdhNCfbVevzTOM6/4i4awoXQ=="
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "handle": "admin@spacesops",
+  "script_pubkey": "51206493c69f046ac3033f050000f4e4e8a623dd28423165d8fa76dd9011aecaebbc",
+  "anchor": "ea8922cf26a0e8dee93eea346ee7810a2b5927098f4aa5f71db6664e4574fa8f",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALRw5Nbi/a9QG9OiZoV72C6d+3zpaqNt7i5YqWgXnnp+QDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSBkk8afBGrDAz8FAAD05OimI90oQjFl2Pp23ZARrsrrvA=="
+  }
+}

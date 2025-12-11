@@ -1,0 +1,9 @@
+{
+  "handle": "test@space",
+  "script_pubkey": "51207fb827192b4ae496f45e6a7384b3258dea6c212dc5db4d7b7c5e8f7952037e99",
+  "anchor": "7ae80ecce2645b26c6ed273eb0c70c34d38e44f5c51a62f3915446c7511a0326",
+  "witness": {
+    "type": "subtree",
+    "data": "AQwJcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALo3x6/E0O23OQIQ0F/0GrpledvkD7HufkkMRlSUhujHQAJfni/BD78OuBQRfn6pN/U47B/GzY3rU344U8mDEloqwAiUSB/uCcZK0rklvReanOEsyWN6mwhLcXbTXt8Xo95UgN+mQ=="
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "version": 0,
+  "space": "@pubkey",
+  "entries": [
+    {
+      "pre_diff_root": null,
+      "post_diff_root": "d50c31f0ea3cb1672544d7902998bb5be69682c9bfc2541fbd529fb2913473ce",
+      "diff_file": "000000_d50c31f0ea3cb1672544d7902998bb5be69682c9bfc2541fbd529fb2913473ce.diff.bin",
+      "subtree_file": null,
+      "step_receipt": null,
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "d50c31f0ea3cb1672544d7902998bb5be69682c9bfc2541fbd529fb2913473ce",
+      "post_diff_root": "ff34824c30bba31618e7ce4e70c3d43fc14257efaaf639457d1e6d6f5b8b7040",
+      "diff_file": "000001_ff34824c30bba31618e7ce4e70c3d43fc14257efaaf639457d1e6d6f5b8b7040.diff.bin",
+      "subtree_file": "000001_ff34824c30bba31618e7ce4e70c3d43fc14257efaaf639457d1e6d6f5b8b7040.subtree.bin",
+      "step_receipt": "000000_ff34824c30bba31618e7ce4e70c3d43fc14257efaaf639457d1e6d6f5b8b7040.step.zk.bin",
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    }
+  ],
+  "tip_receipt": "000000_ff34824c30bba31618e7ce4e70c3d43fc14257efaaf639457d1e6d6f5b8b7040.step.zk.bin",
+  "tip_receipt_groth16": null
+}

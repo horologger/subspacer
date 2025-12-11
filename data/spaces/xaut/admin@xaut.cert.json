@@ -1,0 +1,9 @@
+{
+  "handle": "admin@xaut",
+  "script_pubkey": "5120d95365caad98b039ba30e89e2af4909b2fc2b6483f5ebe258639b7f65693641c",
+  "anchor": "797b66c018f5c8c40aa96f19ed358db411badd0b12f8cea8e98f4128735af156",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKlXw3xcbx7c0/qmlkpwskJ5sVNWgaEFqxdKJIu1qbi0gDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSDZU2XKrZiwObow6J4q9JCbL8K2SD9eviWGObf2VpNkHA=="
+  }
+}

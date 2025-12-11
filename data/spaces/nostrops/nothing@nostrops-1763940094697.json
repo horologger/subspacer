@@ -1,0 +1,10 @@
+{
+  "version": "01",
+  "items": [
+    {
+      "type": "00",
+      "typeName": "Handle",
+      "value": "nothing@nostrops"
+    }
+  ]
+}

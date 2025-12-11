@@ -1,0 +1,4 @@
+## SUBSD RPC
+
+export SUBS_RPC_HOST=0.0.0.0
+export SUBS_RPC_PORT=

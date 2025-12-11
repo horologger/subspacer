@@ -1,0 +1,9 @@
+{
+  "handle": "dang@nomad",
+  "script_pubkey": "5120ab5ea523dca9f1fac23bcc366e85bfa31bec44007074d71ecc24eaf4704f2488",
+  "anchor": "5e8beb26209f87e971421236092e2b93d52751954e034c310adb16aad679777c",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo7AypeH1YNHXEX4Oyl04oCKBK8h7tdub06XQSOYjmzgAiUSCrXqUj3Knx+sI7zDZuhb+jG+xEAHB01x7MJOr0cE8kiAJo1ondSD47y8lLwWa28UEcOk8DbbRbmjG4blYD2ugddg=="
+  }
+}

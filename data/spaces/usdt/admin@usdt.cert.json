@@ -1,0 +1,9 @@
+{
+  "handle": "admin@usdt",
+  "script_pubkey": "5120cd431362310d8dff636877770cfb94be62547e5c81c098705c22c16641b3f631",
+  "anchor": "f4a29d5d1b3b9b65ed142a545b1ec83dbfa0f1492a1432605390e867a8f7cc41",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIUqhQS4/K3PmkUN2kcgGQT8socaKQ5Mm8/oHOno5XTtwDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSDNQxNiMQ2N/2Nod3cM+5S+YlR+XIHAmHBcIsFmQbP2MQ=="
+  }
+}

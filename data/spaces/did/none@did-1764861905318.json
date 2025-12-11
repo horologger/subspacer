@@ -1,0 +1,35 @@
+{
+  "version": "01",
+  "items": [
+    {
+      "type": "00",
+      "typeName": "Handle",
+      "value": "none@did"
+    },
+    {
+      "type": "02",
+      "typeName": "Nostr Pub",
+      "value": "npub1mutuum8xdpgtaylq53ese0hlchgenzg3wqwhgvd4dse926v7hhks0qhsj3"
+    },
+    {
+      "type": "01",
+      "typeName": "Owner URI",
+      "value": "http://70.251.209.207:8888/api-docs/"
+    },
+    {
+      "type": "03",
+      "typeName": "Nostr Relays",
+      "value": "wss://relay.primal.net/,wss://relay.damus.io/"
+    },
+    {
+      "type": "05",
+      "typeName": "DID",
+      "value": "did:btc:x20r-ayaz-qqtl-ljk"
+    },
+    {
+      "type": "09",
+      "typeName": "TXT",
+      "value": "This is a test of greater than 80 hex bytes. Actual length 254."
+    }
+  ]
+}

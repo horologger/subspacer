@@ -1,0 +1,15 @@
+{
+  "version": "01",
+  "items": [
+    {
+      "type": "00",
+      "typeName": "Handle",
+      "value": "everything@nostrops"
+    },
+    {
+      "type": "02",
+      "typeName": "Nostr Pub",
+      "value": "npub1mutuum8xdpgtaylq53ese0hlchgenzg3wqwhgvd4dse926v7hhks0qhsj3"
+    }
+  ]
+}
