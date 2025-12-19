@@ -270,6 +270,7 @@ struct ApiDoc;
     )
 )]
 async fn healthcheck(_state: State<AppState>) -> Json<HealthResponse> {
+    info!("Health check endpoint called");
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -710,15 +711,8 @@ async fn get_subspace_cert(
             .unwrap_or(false);
     
     // Get spaces list if app parameter is present
-    let spaces = if let Some(app_name) = &params.app {
-        let app_configs = state.app_configs.lock().await;
-        let spaces_list = app_configs.get(app_name).cloned().unwrap_or_default();
-        if spaces_list.is_empty() {
-            warn!("App '{}' not found in configuration or returned empty list", app_name);
-        } else {
-            info!("Found {} spaces for app '{}': {:?}", spaces_list.len(), app_name, spaces_list);
-        }
-        spaces_list
+    let spaces = if params.app.is_some() {
+        vec![space_name.clone()]
     } else {
         Vec::new()
     };
