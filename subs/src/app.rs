@@ -1,29 +1,37 @@
+use libveritas::sname::{NameLike, SName};
 use std::{fs, io};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use anyhow::{anyhow, Context};
 use atty::Stream;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 
-use methods::{STEP_ELF, STEP_ID, FOLD_ELF, FOLD_ID};
+use libveritas_methods::{STEP_ELF, STEP_ID, FOLD_ELF, FOLD_ID};
 use risc0_zkvm::{default_prover, ExecutorEnv, Prover, ProverOpts, Receipt};
 
 use serde::{Deserialize, Serialize};
 
 use spacedb::db::Database;
-use spacedb::{Hash, Sha256Hasher};
+use spacedb::{Hash, NodeHasher, Sha256Hasher};
 use spacedb::tx::{ProofType};
-use bitcoin::{key, ScriptBuf, XOnlyPublicKey};
+use bitcoin::{key, OutPoint, ScriptBuf, XOnlyPublicKey};
+use bitcoin::hashes::{Hash as HashUtil, sha256};
 use bitcoin::secp256k1::{rand, Secp256k1};
+use libveritas::cert::{Certificate, HandleSubtree, LeafKind, PtrsSubtree, SpacesSubtree, Witness};
 use spaces_protocol::slabel::SLabel;
 
-use program::BatchReader;
-use program::guest::Commitment;
+
+use libveritas_zk::BatchReader;
+use libveritas_zk::guest::Commitment;
 use regex::Regex;
-use crate::{Batch, BatchEntry, HandleRequest, JsonCert, JsonWitness};
-use crate::handle::{Handle, SSLabel, Sha256Hashable};
+use spacedb::subtree::SubTree;
+use spaces_client::auth::http_client_with_auth;
+use spaces_client::jsonrpsee::http_client::HttpClient;
+use spaces_client::rpc::RpcClient;
+use spaces_ptr::sptr::Sptr;
+use crate::{Batch, BatchEntry, HandleRequest};
 
 const STAGING_FILE: &str = "uncommitted.json";
 
@@ -92,7 +100,7 @@ pub enum CertCmd {
 #[command(author, version, about, long_about = None)]
 pub struct RequestArgs {
     /// The handle name e.g. alice@example
-    handle: Handle,
+    handle: SName,
     #[arg(short = 's', long)]
     script_pubkey: Option<String>,
 }
@@ -128,7 +136,19 @@ pub struct ProveArgs {
 #[command(author, version, about, long_about = None)]
 pub struct IssueArgs {
     /// The handle name e.g. alice@example
-    pub handle: Handle,
+    pub handle: SName,
+    /// Spaces rpc url
+    #[arg(long)]
+    pub rpc_url: String,
+    /// Spaces rpc user
+    #[arg(long)]
+    pub rpc_user: Option<String>,
+    /// Spaces rpc password
+    #[arg(long)]
+    pub rpc_password: Option<String>,
+    /// Space cookie path
+    #[arg(long)]
+    pub rpc_cookie: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -141,6 +161,17 @@ pub struct VerifyArgs {
     #[arg(long)]
     root: Option<PathBuf>,
 
+    #[arg(required = true)]
+    pub rpc_url: String,
+    /// Spaces rpc user
+    #[arg(long)]
+    pub rpc_user: Option<String>,
+    /// Spaces rpc password
+    #[arg(long)]
+    pub rpc_password: Option<String>,
+    /// Space cookie path
+    #[arg(long)]
+    pub rpc_cookie: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone)]
@@ -165,25 +196,6 @@ struct ChainEntry {
 
 pub struct App {
     wd: PathBuf,
-}
-
-impl Chain {
-    pub fn root_cert(&self, receipt: Receipt) -> anyhow::Result<JsonCert> {
-        if self.space.is_none() {
-            return Err(anyhow!("At least one commit is required to get a root certificate"));
-        }
-        Ok(JsonCert {
-            request: HandleRequest {
-                handle: Handle::new(
-                    SSLabel::from_str("self").expect("valid sslabel"),
-                    self.space.clone().expect("space"),
-                ),
-                script_pubkey: "<root>".to_string(),
-            },
-            anchor: self.entries.last().clone().expect("unwrap").post_diff_root.clone(),
-            witness: JsonWitness::Receipt(receipt),
-        })
-    }
 }
 
 impl App {
@@ -216,11 +228,6 @@ impl App {
         self.wd.join("chain.json")
     }
 
-    fn root_cert_path(&self, space: &SLabel) -> PathBuf {
-        let space = format!("{}.cert.json", space);
-        self.wd.join(space)
-    }
-
     fn sdb_path(&self, space: &SLabel) -> PathBuf {
         self.wd.join(format!("{}.sdb", space))
     }
@@ -246,13 +253,6 @@ impl App {
         Ok(())
     }
 
-    fn save_root_cert(&self, cert: &JsonCert) -> anyhow::Result<()> {
-        fs::create_dir_all(self.commitments_dir())?;
-        fs::write(self.root_cert_path(cert.request.handle.space()),
-                  serde_json::to_vec_pretty(cert)?)?;
-        Ok(())
-    }
-
     fn load_batch(&self) -> anyhow::Result<Option<Batch>> {
         let p = self.staging_path();
         if !p.exists() { return Ok(None); }
@@ -271,9 +271,8 @@ impl App {
 
     fn load_receipt_and_commitment(&self, path: &Path) -> anyhow::Result<(Receipt, Commitment)> {
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let (receipt, _): (Receipt, usize) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .map_err(|e| anyhow!("decode receipt {}: {}", path.display(), e))?;
+        let receipt: Receipt = borsh::from_slice(&bytes)
+            .map_err(|e| anyhow!("decode receipt {}: {}", path.display(), e))?;
         let cm: Commitment = receipt.journal.decode()
             .map_err(|e| anyhow!("decode journal {}: {}", path.display(), e))?;
         Ok((receipt, cm))
@@ -304,10 +303,10 @@ impl App {
         let mut reader = if let Some(db) = db {
             Some(db.begin_read()?)
         } else { None };
-        let mut get_handle = |handle: &Handle| -> anyhow::Result<Option<Vec<u8>>> {
+        let mut get_handle = |handle: &SName| -> anyhow::Result<Option<Vec<u8>>> {
             match reader.as_mut() {
                 None => Ok(None),
-                Some(r) => Ok(r.get(&handle.subspace().sha256())?)
+                Some(r) => Ok(r.get(&Sha256Hasher::hash(handle.subspace().expect("subspace").as_slabel().as_ref()))?)
             }
         };
 
@@ -317,7 +316,8 @@ impl App {
             let existing = chain.space.as_ref()
                 .or(batch.as_ref().map(|s| &s.space));
             if let Some(existing) = existing {
-                if existing != req.handle.space() {
+                // TODO: fix clone
+                if Some(existing.clone()) != req.handle.space() {
                     return Err(anyhow!("Cannot add '{}' to existing space '{}'",
                          req.handle, existing)
                     );
@@ -331,7 +331,7 @@ impl App {
             let prev = get_handle(&req.handle)?
                 .or_else(|| batch.as_ref()
                     .and_then(|b| b.entries.iter()
-                        .find(|e| &e.sub_label == req.handle.subspace())
+                        .find(|e| req.handle.subspace().as_ref() == Some(&e.sub_label))
                         .map(|e| e.script_pubkey.to_bytes())));
 
             if let Some(value) = prev {
@@ -343,8 +343,8 @@ impl App {
                 return Ok(());
             }
 
-            let mut b = batch.take().unwrap_or_else(|| Batch::new(req.handle.space().clone()));
-            b.entries.push(BatchEntry { sub_label: req.handle.subspace().clone(), script_pubkey: script_pubkey.into() });
+            let mut b = batch.take().unwrap_or_else(|| Batch::new(req.handle.space().expect("space").clone()));
+            b.entries.push(BatchEntry { sub_label: req.handle.subspace().expect("subspace").clone(), script_pubkey: script_pubkey.into() });
             *batch = Some(b);
             println!("   → {}", req.handle);
             Ok(())
@@ -416,7 +416,7 @@ impl App {
         let mut snapshot = db.begin_read()?;
         let subtree = snapshot.prove(&keys, ProofType::Standard)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("could not generate subtree: {}", e)))?;
-        let subtree = bincode::encode_to_vec(&subtree, bincode::config::standard())
+        let subtree = borsh::to_vec(&subtree)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("could not encode subtree: {}", e)))?;
 
         Ok((Some(subtree), batch))
@@ -430,7 +430,7 @@ impl App {
 
         let chain = match subtree_opt {
             Some(subtree_bytes) => {
-                let c = program::guest::run(subtree_bytes.clone(), diff_bytes.clone(), STEP_ID, FOLD_ID)
+                let c = libveritas_zk::guest::run(subtree_bytes.clone(), diff_bytes.clone(), STEP_ID, FOLD_ID)
                     .map_err(|e| anyhow!("could not validate program input: {}", e))?;
 
                 if args.dry_run {
@@ -469,10 +469,9 @@ impl App {
                     .ok_or(anyhow!("No database found"))?;
                 let mut tx = db.begin_write()?;
                 for e in batch.entries {
-                    tx = tx.insert(e.sub_label.sha256(), e.script_pubkey.to_bytes())?;
+                    tx = tx.insert(Sha256Hasher::hash(e.sub_label.as_slabel().as_ref()), e.script_pubkey.to_bytes())?;
                 }
                 tx.commit()?;
-
                 chain
             }
 
@@ -486,7 +485,7 @@ impl App {
 
                 let mut tx = db.begin_write()?;
                 for e in &batch.entries {
-                    tx = tx.insert(e.sub_label.sha256(), e.script_pubkey.to_bytes())?;
+                    tx = tx.insert(Sha256Hasher::hash(e.sub_label.as_slabel().as_ref()), e.script_pubkey.to_bytes())?;
                 }
                 tx.commit()?;
 
@@ -574,7 +573,7 @@ impl App {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("[#{}] verify step failed: {}", i, e)))?;
             println!("[#{}] Step verified in {:?}", i, start.elapsed());
 
-            let raw = bincode::serde::encode_to_vec(&receipt, bincode::config::standard())
+            let raw = borsh::to_vec(&receipt)
                 .map_err(|e| anyhow!("[#{}] serialize step receipt: {}", i, e))?;
             fs::write(&step_path, raw)
                 .with_context(|| format!("[#{}] writing {}", i, step_path.display()))?;
@@ -614,8 +613,7 @@ impl App {
 
             if agg_path.exists() {
                 let bytes = fs::read(&agg_path)?;
-                let (r, _): (Receipt, usize) =
-                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard())?;
+                let r: Receipt = borsh::from_slice(&bytes)?;
                 r.verify(FOLD_ID)?;
                 let cm: Commitment = r.journal.decode()?;
 
@@ -650,7 +648,7 @@ impl App {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("[#{}] fold verify failed: {}", i, e)))?;
             println!("[#{}] Fold verified in {:?}", i, start.elapsed());
 
-            let raw = bincode::serde::encode_to_vec(&folded, bincode::config::standard())
+            let raw = borsh::to_vec(&folded)
                 .map_err(|e| anyhow!("[#{}] serialize fold receipt: {}", i, e))?;
             fs::write(&agg_path, raw)
                 .with_context(|| format!("[#{}] writing {}", i, agg_path.display()))?;
@@ -672,14 +670,7 @@ impl App {
         }
 
         self.save_chain(&chain)?;
-        println!("Fold pass complete.");
-
-        if let Some(receipt) = acc_receipt {
-            let cert = chain.root_cert(receipt)?;
-            self.save_root_cert(&cert)?;
-            println!("✔ Root certificate updated");
-            println!("   → {}", chain.space.expect("space"));
-        }
+        println!("✔ Fold pass complete");
 
         Ok(())
     }
@@ -704,7 +695,7 @@ impl App {
         let info = prover.prove_with_opts(env, FOLD_ELF, &opts)?;
         let snark_path = tip_path.with_extension("snark.bin");
 
-        let raw = bincode::serde::encode_to_vec(&info.receipt, bincode::config::standard())
+        let raw = borsh::to_vec(&info.receipt)
             .map_err(|e| anyhow!("serialize snark receipt: {}", e))?;
         fs::write(&snark_path, raw)
             .with_context(|| format!("writing {}", snark_path.display()))?;
@@ -716,14 +707,6 @@ impl App {
         self.save_chain(&chain)?;
         println!("✔ Compressed proof");
         println!("   → {}", snark_path.display());
-
-        let cert = chain.root_cert(info.receipt)?;
-        let name = format!("{}.cert.json", &chain.space.expect("space"));
-        let p = self.commitments_dir().join(&name);
-        let cert = serde_json::to_string_pretty(&cert)?;
-        fs::write(p, cert)?;
-        println!("✔ Root certificate updated");
-        println!("   → {}", name);
 
         Ok(())
     }
@@ -768,16 +751,76 @@ impl App {
         if args.script_pubkey.is_none() {
             println!("   → Private key saved: {}", priv_file);
         }
-        println!("\nSubmit the request file to {} operator to get a certificate.", args.handle.space());
+        println!("\nSubmit the request file to {} operator to get a certificate.", args.handle.space().expect("space"));
         Ok(())
     }
 
-    pub fn cmd_cert_issue(&self, args: IssueArgs) -> anyhow::Result<()> {
-        let db = self.load_db(&args.handle.space())?
+    pub async fn cmd_cert_issue(&self, args: IssueArgs) -> anyhow::Result<()> {
+        let client =
+            client_from_args(&args.rpc_url, args.rpc_user, args.rpc_password, args.rpc_cookie)?;
+        if args.handle.label_count() == 0 || args.handle.label_count() > 2 {
+            return Err(anyhow!("specify a valid handle"));
+        }
+
+        let space = args.handle.space().expect("space");
+        let space_str = space.to_string();
+
+        let space_info = client.get_space(&space_str).await?
+            .ok_or_else(|| anyhow!("space does not exist"))?;
+
+        let space_proof = client.prove_ptrout(
+            space_info.outpoint(), None
+        ).await?;
+
+        let space_inclusion : SubTree<Sha256Hasher> = borsh::from_slice(&space_proof.proof)
+            .map_err(|e| anyhow!("could not decode space proof: {}", e))?;
+
+        // Load the space receipt
+        let chain = self.load_chain()?;
+        let receipt_rel = chain.tip_receipt_groth16
+            .or(chain.tip_receipt)
+            .ok_or_else(|| anyhow!("No receipt found - run prove first"))?;
+        let receipt_path = self.commitments_dir().join(&receipt_rel);
+        let (receipt, commitment_info) = self.load_receipt_and_commitment(&receipt_path)?;
+
+        let commitment_proof = client
+            .prove_commitment(
+                space,
+                sha256::Hash::from_slice(&commitment_info.final_root).expect("valid"),
+                None
+            ).await.map_err(|e| anyhow!("could not prove commitment: {}", e))?;
+
+        let commitment_inclusion : SubTree<Sha256Hasher> = borsh::from_slice(&commitment_proof.proof)
+            .map_err(|e| anyhow!("could not decode commitment proof: {}", e))?;
+
+        let root = Certificate {
+            subject: args.handle.clone(),
+            witness: Witness::Root {
+                inclusion: SpacesSubtree(space_inclusion),
+                // TODO: include delegate information for the space in this tree
+                ptrs: Some(PtrsSubtree(commitment_inclusion)),
+                commitment: Some(receipt),
+            },
+        };
+
+        if args.handle.is_single_label() {
+            let out_name = format!("{}.cert.bin", &args.handle);
+            let out_path = self.wd.join(&out_name);
+            let cert_bytes = borsh::to_vec(&root)
+                .map_err(|e| anyhow!("could not serialize root cert: {}", e))?;
+            fs::write(&out_path, cert_bytes)?;
+
+            println!("✔ Issued root certificate");
+            println!("   → {}", out_name);
+            return Ok(());
+        }
+
+        // It's a handle so we have to create a handle cert
+        let db = self.load_db(&args.handle.space().expect("space"))?
             .ok_or(anyhow!("No database found"))?;
         let mut snap = db.begin_read()?;
 
-        let key = args.handle.subspace().sha256();
+        let key = Sha256Hasher::hash(args.handle.subspace().expect("subspace").as_slabel().as_ref());
         let spk = snap.get(&key)?.ok_or_else(|| {
             anyhow!("handle '{}' not found", args.handle)
         })?;
@@ -785,140 +828,222 @@ impl App {
         let subtree = snap.prove(&[key], ProofType::Standard)
             .map_err(|e| anyhow!("could not generate subtree: {}", e))?;
 
-        let anchor = hex::encode(
-            subtree.compute_root().map_err(|e| anyhow!("subtree compute_root: {}", e))?
-        );
+        let sptr = Sptr::from_spk::<Sha256>(ScriptBuf::from_bytes(spk.clone()));
+        let ptr_info = client.get_ptr(sptr)
+            .await.map_err(|e| anyhow!("could not get ptr: {}", e))?;
 
-        let cert = JsonCert {
-            request: HandleRequest {
-                handle: args.handle.clone(),
-                script_pubkey: hex::encode(spk),
-            },
-            anchor,
-            witness: JsonWitness::SubTree(subtree),
+        let key_rotation_proof = match ptr_info {
+            None => {
+                client.prove_ptr_outpoint(sptr).await
+                    .map_err(|e| anyhow!("could not prove ptr exclusion: {}", e))?
+            }
+            Some(info) => {
+                client.prove_ptrout(OutPoint {
+                    txid: info.txid,
+                    vout: info.ptrout.n as _,
+                }, None).await
+                    .map_err(|e| anyhow!("could not prove ptr inclusion: {}", e))?
+
+            }
         };
 
-        let out_name = format!("{}.cert.json", &args.handle);
-        let out_path = self.wd.join(&out_name);
-        fs::write(&out_path, serde_json::to_string_pretty(&cert)?)?;
+        let key_rotation : SubTree<Sha256Hasher> = borsh::from_slice(&key_rotation_proof.proof)
+            .map_err(|e| anyhow!("could not decode key rotation proof: {}", e))?;
 
-        println!("✔ Issued certificate");
-        println!("   → {}", out_name);
+        let leaf = Certificate {
+            subject: args.handle,
+            witness: Witness::Leaf {
+                genesis_spk: ScriptBuf::from_bytes(spk),
+                kind: LeafKind::Final {
+                    inclusion: HandleSubtree(subtree),
+                    key_rotation: PtrsSubtree(key_rotation),
+                }
+            },
+        };
+
+        // Save root cert
+        let root_name = format!("{}.root.cert.bin", &leaf.subject);
+        let root_path = self.wd.join(&root_name);
+        let root_bytes = borsh::to_vec(&root)
+            .map_err(|e| anyhow!("could not serialize root cert: {}", e))?;
+        fs::write(&root_path, root_bytes)?;
+
+        // Save leaf cert
+        let leaf_name = format!("{}.cert.bin", &leaf.subject);
+        let leaf_path = self.wd.join(&leaf_name);
+        let leaf_bytes = borsh::to_vec(&leaf)
+            .map_err(|e| anyhow!("could not serialize leaf cert: {}", e))?;
+        fs::write(&leaf_path, leaf_bytes)?;
+
+        println!("✔ Issued certificates");
+        println!("   → {}", root_name);
+        println!("   → {}", leaf_name);
         Ok(())
     }
 
-    pub fn cmd_cert_verify(&self, args: VerifyArgs) -> anyhow::Result<()> {
-        let sub_cert_bytes = fs::read(&args.cert_file)
+    pub async fn cmd_cert_verify(&self, args: VerifyArgs) -> anyhow::Result<()> {
+        let _client =
+            client_from_args(&args.rpc_url, args.rpc_user, args.rpc_password, args.rpc_cookie)?;
+
+        // Load the leaf/handle certificate
+        let cert_bytes = fs::read(&args.cert_file)
             .with_context(|| format!("reading {}", args.cert_file.display()))?;
-        let sub_cert: JsonCert = serde_json::from_slice(&sub_cert_bytes)
+        let cert: Certificate = borsh::from_slice(&cert_bytes)
             .map_err(|e| anyhow!("parse {}: {}", args.cert_file.display(), e))?;
 
-        let sub_root = match &sub_cert.witness {
-            JsonWitness::SubTree(st) => {
-                st.compute_root().map_err(|e| anyhow!("subtree compute_root: {}", e))?
+        // Load root certificate if provided
+        let root_cert: Option<Certificate> = match &args.root {
+            Some(root_path) => {
+                let root_bytes = fs::read(root_path)
+                    .with_context(|| format!("reading {}", root_path.display()))?;
+                Some(borsh::from_slice(&root_bytes)
+                    .map_err(|e| anyhow!("parse {}: {}", root_path.display(), e))?)
             }
-            JsonWitness::Receipt(_) => {
-                return Err(anyhow!("{} is a root certificate",
-                               args.cert_file.display()));
-            }
+            None => None,
         };
 
-        if args.root.is_none() {
-            println!("✔ Ready to verify inclusion");
-            println!("   → handle:   {}", sub_cert.request.handle);
-            println!("   → genesis:  {}", hex::encode(sub_root));
-            println!("   → root:     {}", hex::encode(sub_root));
-            println!("   → history:  {}", hex::encode(sub_root));
+        let anchors = _client.get_root_anchors().await
+            .map_err(|e| anyhow!("could not load anchors: {}", e))?;
 
+        let veritas_anchors = serde_json::to_string(&anchors).expect("anchors");
+        let veritas_anchors : Vec<libveritas::RootAnchor> = serde_json::from_str(&veritas_anchors)
+            .expect("decode anchors");
+
+        let veritas = libveritas::Veritas
+        ::from_anchors(veritas_anchors).expect("valid anchors");
+
+        if let Some(root) = root_cert {
+            let root_zone = veritas.verify(root, None)?;
+            let leaf_zone = veritas.verify(cert, Some(&root_zone))?;
+
+            println!("✔ Certificate verified");
             println!();
-            println!("   To verify inclusion, run:");
-            println!(
-                "       $ space-cli getcommitment {} {}",
-                sub_cert.request.handle.space(),
-                hex::encode(sub_root)
-            );
-            println!("   ⚠️ Make sure the root, and history hashes match!");
-            return Ok(());
-        }
-        let root_path = args.root.expect("root");
+            print_zone(&root_zone, "Root");
+            println!();
+            print_zone(&leaf_zone, "Handle");
+        } else {
+            let zone = veritas.verify(cert, None)?;
 
-        let root_cert_bytes = fs::read(&root_path)
-            .with_context(|| format!("reading {}", root_path.display()))?;
-        let root_cert: JsonCert = serde_json::from_slice(&root_cert_bytes)
-            .map_err(|e| anyhow!("parse {}: {}", root_path.display(), e))?;
-
-        if sub_cert.request.handle.space() != root_cert.request.handle.space() {
-            return Err(anyhow!("invalid root {}, handle's parent is {}",
-                root_cert.request.handle.space(),
-                sub_cert.request.handle.space()
-            ))
+            println!("✔ Certificate verified");
+            println!();
+            print_zone(&zone, "Root");
         }
 
-        if root_cert.request.handle.subspace() != &SSLabel::from_str("self")
-            .expect("valid") {
-            return Err(anyhow!("invalid root certificate with non-self subject"))
-        }
-
-        // Verify the receipt, try FOLD first then STEP (root could be aggregate or single step)
-        let commitment: Commitment = match &root_cert.witness {
-            JsonWitness::Receipt(receipt) => {
-                // Try FOLD_ID then STEP_ID
-                if let Err(e1) = receipt.verify(FOLD_ID) {
-                    if let Err(e2) = receipt.verify(STEP_ID) {
-                        return Err(anyhow!("root receipt verify failed: fold={} step={}", e1, e2));
-                    }
-                }
-                receipt.journal.decode()
-                    .map_err(|e| anyhow!("decode commitment from receipt journal: {}", e))?
-            }
-            JsonWitness::SubTree(_) => {
-                return Err(anyhow!("{} is not a root certificate (expected receipt witness)",
-                               root_path.display()));
-            }
-        };
-
-        let root_hash = root_cert.request.handle.space().sha256();
-        if root_hash != commitment.space {
-            return Err(anyhow!("bad receipt expected space hash {}, got {}",
-                               hex::encode(root_hash), hex::encode(commitment.space)));
-        }
-
-        // Compare roots: subtree.compute_root() must match commitment.final_root
-        let final_root = commitment.final_root.clone();
-        let genesis_root = commitment.initial_root.clone();
-        let history_hash = commitment.transcript.clone();
-        if sub_root != final_root {
-            return Err(anyhow!(
-            "root mismatch: subtree={} receipt_final={}",
-            hex::encode(sub_root),
-            hex::encode(final_root)
-        ));
-        }
-
-        if root_cert.anchor != sub_cert.anchor {
-            return Err(anyhow!(
-                "anchor mismatch: subspace anchor {} != root anchor {}",
-                sub_cert.anchor, root_cert.anchor
-            ));
-        }
-
-
-        println!("✔ Ready to verify for inclusion");
-        println!("   → handle : {}", sub_cert.request.handle);
-        println!("   → genesis: {}", hex::encode(genesis_root));
-        println!("   → root : {}", hex::encode(final_root));
-        println!("   → history : {}", hex::encode(history_hash));
-
-        println!();
-        println!("   To verify inclusion, run:");
-        println!(
-            "       $ space-cli getcommitment {} {}",
-            sub_cert.request.handle.space(),
-            hex::encode(final_root)
-        );
-        println!("   ⚠️ Make sure the root, and history hashes match!");
         Ok(())
     }
+
+    // pub fn cmd_cert_verify_old(&self, args: VerifyArgs) -> anyhow::Result<()> {
+    //     let sub_cert_bytes = fs::read(&args.cert_file)
+    //         .with_context(|| format!("reading {}", args.cert_file.display()))?;
+    //     let sub_cert: JsonCert = serde_json::from_slice(&sub_cert_bytes)
+    //         .map_err(|e| anyhow!("parse {}: {}", args.cert_file.display(), e))?;
+    //
+    //     let sub_root = match &sub_cert.witness {
+    //         JsonWitness::SubTree(st) => {
+    //             st.compute_root().map_err(|e| anyhow!("subtree compute_root: {}", e))?
+    //         }
+    //         JsonWitness::Receipt(_) => {
+    //             return Err(anyhow!("{} is a root certificate",
+    //                            args.cert_file.display()));
+    //         }
+    //     };
+    //
+    //     if args.root.is_none() {
+    //         println!("✔ Ready to verify inclusion");
+    //         println!("   → handle:   {}", sub_cert.request.handle);
+    //         println!("   → genesis:  {}", hex::encode(sub_root));
+    //         println!("   → root:     {}", hex::encode(sub_root));
+    //         println!("   → history:  {}", hex::encode(sub_root));
+    //
+    //         println!();
+    //         println!("   To verify inclusion, run:");
+    //         println!(
+    //             "       $ space-cli getcommitment {} {}",
+    //             sub_cert.request.handle.space().expect("space"),
+    //             hex::encode(sub_root)
+    //         );
+    //         println!("   ⚠️ Make sure the root, and history hashes match!");
+    //         return Ok(());
+    //     }
+    //     let root_path = args.root.expect("root");
+    //
+    //     let root_cert_bytes = fs::read(&root_path)
+    //         .with_context(|| format!("reading {}", root_path.display()))?;
+    //     let root_cert: JsonCert = serde_json::from_slice(&root_cert_bytes)
+    //         .map_err(|e| anyhow!("parse {}: {}", root_path.display(), e))?;
+    //
+    //     if sub_cert.request.handle.space() != root_cert.request.handle.space() {
+    //         return Err(anyhow!("invalid root {}, handle's parent is {}",
+    //             root_cert.request.handle.space().expect("space"),
+    //             sub_cert.request.handle.space().expect("space")
+    //         ))
+    //     }
+    //
+    //     if root_cert.request.handle.subspace().expect("subspace") != Label::from_str("self")
+    //         .expect("valid") {
+    //         return Err(anyhow!("invalid root certificate with non-self subject"))
+    //     }
+    //
+    //     // Verify the receipt, try FOLD first then STEP (root could be aggregate or single step)
+    //     let commitment: Commitment = match &root_cert.witness {
+    //         JsonWitness::Receipt(receipt) => {
+    //             // Try FOLD_ID then STEP_ID
+    //             if let Err(e1) = receipt.verify(FOLD_ID) {
+    //                 if let Err(e2) = receipt.verify(STEP_ID) {
+    //                     return Err(anyhow!("root receipt verify failed: fold={} step={}", e1, e2));
+    //                 }
+    //             }
+    //             receipt.journal.decode()
+    //                 .map_err(|e| anyhow!("decode commitment from receipt journal: {}", e))?
+    //         }
+    //         JsonWitness::SubTree(_) => {
+    //             return Err(anyhow!("{} is not a root certificate (expected receipt witness)",
+    //                            root_path.display()));
+    //         }
+    //     };
+    //
+    //     let root_hash = Sha256Hasher::hash(root_cert.request.handle.space().expect("space").as_ref());
+    //     if root_hash != commitment.space {
+    //         return Err(anyhow!("bad receipt expected space hash {}, got {}",
+    //                            hex::encode(root_hash), hex::encode(commitment.space)));
+    //     }
+    //
+    //     // Compare roots: subtree.compute_root() must match commitment.final_root
+    //     let final_root = commitment.final_root.clone();
+    //     let genesis_root = commitment.initial_root.clone();
+    //     let history_hash = commitment.transcript.clone();
+    //     if sub_root != final_root {
+    //         return Err(anyhow!(
+    //         "root mismatch: subtree={} receipt_final={}",
+    //         hex::encode(sub_root),
+    //         hex::encode(final_root)
+    //     ));
+    //     }
+    //
+    //     if root_cert.anchor != sub_cert.anchor {
+    //         return Err(anyhow!(
+    //             "anchor mismatch: subspace anchor {} != root anchor {}",
+    //             sub_cert.anchor, root_cert.anchor
+    //         ));
+    //     }
+    //
+    //
+    //     println!("✔ Ready to verify for inclusion");
+    //     println!("   → handle : {}", sub_cert.request.handle);
+    //     println!("   → genesis: {}", hex::encode(genesis_root));
+    //     println!("   → root : {}", hex::encode(final_root));
+    //     println!("   → history : {}", hex::encode(history_hash));
+    //
+    //     println!();
+    //     println!("   To verify inclusion, run:");
+    //     println!(
+    //         "       $ space-cli getcommitment {} {}",
+    //         sub_cert.request.handle.space().expect("space"),
+    //         hex::encode(final_root)
+    //     );
+    //     println!("   ⚠️ Make sure the root, and history hashes match!");
+    //     Ok(())
+    // }
 }
 
 impl AddArgs {
@@ -957,5 +1082,84 @@ impl AddArgs {
         out.sort();
         out.dedup();
         Ok(out)
+    }
+}
+
+pub fn client_from_args(rpc_url: &str, rpc_user: Option<String>, rpc_password: Option<String>, rpc_cookie: Option<String>)
+    -> anyhow::Result<HttpClient> {
+    let auth_token = if rpc_user.is_some() {
+        auth_token_from_creds(
+            rpc_user.as_ref().unwrap(),
+            rpc_password.as_ref().unwrap(),
+        )
+    } else {
+        let cookie_path = match &rpc_cookie {
+            Some(path) => path,
+            None => return Err(anyhow!("Either specify user/password or a cookie path for rpc auth")),
+        };
+        let cookie = fs::read_to_string(cookie_path).map_err(|_| {
+            anyhow!("Could not read cookie file")
+        })?;
+        auth_token_from_cookie(&cookie)
+    };
+    Ok(http_client_with_auth(rpc_url, &auth_token)?)
+}
+
+pub fn auth_cookie(user: &str, password: &str) -> String {
+    format!("{user}:{password}")
+}
+
+pub fn auth_token_from_cookie(cookie: &str) -> String {
+    base64::prelude::BASE64_STANDARD.encode(cookie)
+}
+pub fn auth_token_from_creds(user: &str, password: &str) -> String {
+    base64::prelude::BASE64_STANDARD.encode(auth_cookie(user, password))
+}
+
+pub struct Sha256;
+
+impl spaces_protocol::hasher::KeyHasher for Sha256 {
+    fn hash(data: &[u8]) -> spaces_protocol::hasher::Hash {
+        Sha256Hasher::hash(data)
+    }
+}
+
+fn print_zone(zone: &libveritas::Zone, label: &str) {
+    println!("{} Zone:", label);
+    println!("   handle:     {}", zone.handle);
+    println!("   serial:     {}", zone.serial);
+    println!("   sovereign:  {}", zone.sovereign);
+    println!("   spk:        {}", hex::encode(zone.script_pubkey.as_bytes()));
+
+    if let Some(data) = &zone.data {
+        println!("   data:       {}", hex::encode(data.as_slice()));
+    }
+
+    match &zone.delegate {
+        libveritas::ProvableOption::Exists { value } => {
+            println!("   delegate:");
+            println!("      spk:     {}", hex::encode(value.script_pubkey.as_bytes()));
+            if let Some(data) = &value.data {
+                println!("      data:    {}", hex::encode(data.as_slice()));
+            }
+        }
+        libveritas::ProvableOption::Empty => {
+            println!("   delegate:   (none)");
+        }
+        libveritas::ProvableOption::Unknown => {
+            println!("   delegate:   (unknown)");
+        }
+    }
+
+    match &zone.state_root {
+        libveritas::ProvableOption::Exists { value } => {
+            println!("   state_root: {}", hex::encode(value));
+        }
+        libveritas::ProvableOption::Empty => {
+            println!("   state_root: (none)");
+        }
+        libveritas::ProvableOption::Unknown => {
+            println!("   state_root: (unknown)");
+        }
     }
 }

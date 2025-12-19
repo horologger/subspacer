@@ -1,7 +1,8 @@
 use clap::Parser;
 use subs::app::{App, CertCmd, Cli, Commands};
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
         .init();
@@ -16,8 +17,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Compress(a) => app.cmd_compress_snark(a)?,
         Commands::Cert(a) => {
             match a {
-                CertCmd::Issue(a) => app.cmd_cert_issue(a)?,
-                CertCmd::Verify(a) => app.cmd_cert_verify(a)?,
+                CertCmd::Issue(a) => app.cmd_cert_issue(a).await?,
+                CertCmd::Verify(a) => app.cmd_cert_verify(a).await?,
             }
         }
         Commands::Request(a) => app.cmd_create(a)?,
