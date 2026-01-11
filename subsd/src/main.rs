@@ -613,8 +613,18 @@ async fn check_commitment_on_chain(
 
     let space_handle = format!("@{}", space_name);
     let mut current_anchor = anchor.to_string();
+    let mut iteration = 0;
+    const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
+
+    info!("Checking commitment for space {} with anchor {}", space_name, anchor);
 
     loop {
+        iteration += 1;
+        if iteration > MAX_ITERATIONS {
+            warn!("Max iterations reached checking commitment for space {} anchor {}", space_name, anchor);
+            return "unable to check commitment (max iterations reached)".to_string();
+        }
+
         let rpc_request = RpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "getcommitment".to_string(),
@@ -624,6 +634,8 @@ async fn check_commitment_on_chain(
             ],
             id: 1,
         };
+
+        info!("RPC call {}: getcommitment({}, {})", iteration, space_handle, current_anchor);
 
         let response = match client
             .post(&config.spaced_rpc_url)
@@ -649,15 +661,22 @@ async fn check_commitment_on_chain(
         };
 
         if let Some(error) = rpc_response.error {
-            warn!("RPC error: {:?}", error);
-            return "RPC error:".to_string();
+            warn!("RPC error for space {} anchor {}: {:?}", space_name, current_anchor, error);
+            return format!("RPC error: {:?}", error);
         }
         
         let commitment = match rpc_response.result {
             Some(commitment) => commitment,
             None => {
-                warn!("RPC response missing result");
-                return "unable to check commitment".to_string();
+                if iteration == 1 {
+                    // First iteration with no result means the anchor doesn't exist in any commitment
+                    warn!("Anchor {} for space {} not found in any commitment - subspace may not be committed on-chain yet", current_anchor, space_name);
+                    return "this handle does not appear in any on chain commitment".to_string();
+                } else {
+                    // Subsequent iteration with no result shouldn't happen, but handle it
+                    warn!("RPC response missing result for space {} anchor {} at iteration {}", space_name, current_anchor, iteration);
+                    return "unable to check commitment".to_string();
+                }
             }
         };
 
@@ -1465,6 +1484,33 @@ async fn get_space_info(
             line-height: 1.2;
             margin: 0;
         }}
+        .download-link {{
+            font-size: 0.8em !important;
+            line-height: 1.2;
+            vertical-align: middle;
+            display: inline-flex;
+            align-items: center;
+            text-decoration: none;
+            color: #007bff;
+            font-size: 0.8em;
+            padding: 4px 8px;
+            border: 1px solid #007bff;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+            background-color: transparent;
+            cursor: pointer;
+            font-family: monospace;
+            margin-left: auto;
+        }}
+        .download-link:hover {{
+            background-color: #007bff;
+            color: white;
+        }}
+        .download-icon {{
+            width: 16px;
+            height: 16px;
+            margin-right: 4px;
+        }}
         .info {{
             background-color: white;
             border: 1px solid #ddd;
@@ -1614,7 +1660,17 @@ async fn get_space_info(
 </head>
 <body>
     <div class="back-link"><a href="/spaces">← Back to Spaces List</a></div>
-    <h1>Space: {}</h1>
+    <h1>
+        Space: {}
+        <a href="/spaces/{}/cert" class="download-link" title="Download root certificate">
+            <svg class="download-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Root Certificate
+        </a>
+    </h1>
     <div class="info">
         <div class="field">
             <div class="field-label">Handle</div>
@@ -1708,6 +1764,7 @@ async fn get_space_info(
 </html>"#,
             html_escape(&space_name),
             html_escape(&space_name),
+            html_escape(&space_name),
             html_escape(&cert.handle),
             html_escape(&cert.script_pubkey),
             html_escape(&cert.anchor),
@@ -1767,10 +1824,16 @@ fn is_reserved_subname(subname: &str) -> bool {
 }
 
 /// Calculate the price for a subname based on its length
+/// Special case: if handle ends in "xxxxx", return 1000 satoshis
 /// First calculate effective length as min(length, 11)
 /// Then Price = (13 - effective_length) * 100000 satoshis
 /// Minimum length is 3
 fn subname_pricer(subname: &str) -> u64 {
+    // Special case: handles ending in "xxxxx" return 1000 sats
+    if subname.ends_with("xxxxx") {
+        return 1000;
+    }
+    
     let length = subname.len();
     if length < 3 {
         return 0; // Invalid, but return 0 for safety
@@ -1818,6 +1881,53 @@ fn verify_basic_auth(headers: &HeaderMap, expected_user: &str, expected_password
     }
 
     parts[0] == expected_user && parts[1] == expected_password
+}
+
+/// Download root certificate file endpoint
+/// Anonymous access - no authentication required
+async fn download_root_cert(
+    PathExtractor(space_name): PathExtractor<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // Build the root certificate file path: @space_name.cert.json
+    let cert_file_name = format!("@{}.cert.json", space_name);
+    let cert_file_path = Path::new(&state.config.data_dir)
+        .join(&space_name)
+        .join(&cert_file_name);
+
+    // Check if file exists
+    if !cert_file_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("Certificate file not found: {}", cert_file_name),
+        )
+            .into_response();
+    }
+
+    // Read the certificate file
+    let cert_content = match fs::read_to_string(&cert_file_path) {
+        Ok(content) => content,
+        Err(e) => {
+            error!("Failed to read cert file {}: {}", cert_file_path.display(), e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read certificate file: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    // Return the certificate file with appropriate headers
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", cert_file_name),
+        )
+        .body(cert_content)
+        .unwrap()
+        .into_response()
 }
 
 /// Download certificate file endpoint
@@ -2759,6 +2869,7 @@ async fn main() -> Result<()> {
         .route("/health", get(healthcheck))
         .route("/api", get(discover_endpoints))
         .route("/spaces/:space_name", get(get_space_info))
+        .route("/spaces/:space_name/cert", get(download_root_cert))
         .route("/spaces/:space_name/req", post(upload_space_req_file))
         .route("/spaces/:space_name/prove", post(prove_space))
         .route("/spaces/:space_name/:subspace", get(get_subspace_cert))

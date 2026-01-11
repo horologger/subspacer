@@ -1,0 +1,9 @@
+{
+  "handle": "something@tabconf",
+  "script_pubkey": "51203f8148c4c04dd652abd8b0dbda6c2ac8670686966e9db2d760b087fd73129b98",
+  "anchor": "11bbd74ee3602523becc4bfd4cab34e6d2af1b119c39e0a25f7ae7be7f747870",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJbJGOrZ0/wAJfgFHd0csGt0zt1pRQO4UAsIek/oibdXAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAg45FtHrTx5U2MgEGjmnPIydJu+lkLhnHX+o2GOBCYrAAIlEgP4FIxMBN1lKr2LDb2mwqyGcGhpZunbLXYLCH/XMSm5gCjCZMy1yM4Vgd3wz0yOmspbKv6x3ZO1iSA13N+Gqk6mQ="
+  }
+}

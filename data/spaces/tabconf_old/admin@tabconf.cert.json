@@ -1,0 +1,9 @@
+{
+  "handle": "admin@tabconf",
+  "script_pubkey": "51206dd2b6a42db9d08ff06ce78bfe6f6ea2d244a4fbbe20888702ad9e4d794b1a24",
+  "anchor": "561b449da90aaafec91313073077a77180061b34a8eefc8819fc536e7ea10d5d",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJ9KsiOVwVU6TBa0udIZS4YfoKH+lxPnMDSwe5NDzdxygDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSBt0rakLbnQj/Bs54v+b26i0kSk+74giIcCrZ5NeUsaJA=="
+  }
+}

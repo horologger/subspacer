@@ -1,0 +1,9 @@
+{
+  "handle": "user@bitcoin",
+  "script_pubkey": "5120e0b3d722078810df204dc468199275bab06c3ac1d8c76da93434b3d23c44c0fa",
+  "anchor": "a04c1cf79526b97a6a9f527a19812c76b9a3268d5c0a549161e77adfd97c2acd",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo7AypeH1YNHXEX4Oyl04oCKBK8h7tdub06XQSOYjmzgAiUSDgs9ciB4gQ3yBNxGgZknW6sGw6wdjHbak0NLPSPETA+gKujHHAoc71O0Vo6kYHt6Qtn+ukXe8BkgILUwqcUxbt1A=="
+  }
+}
