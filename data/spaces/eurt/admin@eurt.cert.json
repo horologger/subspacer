@@ -1,0 +1,9 @@
+{
+  "handle": "admin@eurt",
+  "script_pubkey": "5120c88a1f5ed0ee3aa927eafca608e20b55cff91c35304d5676b97135c588ed09f0",
+  "anchor": "5270c4655ccf4f54965071e53ba302e973d36fc893255b4bd74f5bcdb19312f5",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISmoGlH0vCAqOXi7zuqHJPCpFoDbEGDS1717+HgQyr0gDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSDIih9e0O46qSfq/KYI4gtVz/kcNTBNVna5cTXFiO0J8A=="
+  }
+}

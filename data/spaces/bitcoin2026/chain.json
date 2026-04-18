@@ -1,0 +1,62 @@
+{
+  "version": 0,
+  "space": "@bitcoin2026",
+  "entries": [
+    {
+      "pre_diff_root": null,
+      "post_diff_root": "9a0eb7dfcb54c196d54c98e8b2dfac29bdcf41c3547c056ff04c2a92e976b3ea",
+      "diff_file": "000000_9a0eb7dfcb54c196d54c98e8b2dfac29bdcf41c3547c056ff04c2a92e976b3ea.diff.bin",
+      "subtree_file": null,
+      "step_receipt": null,
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "9a0eb7dfcb54c196d54c98e8b2dfac29bdcf41c3547c056ff04c2a92e976b3ea",
+      "post_diff_root": "aa25fe0ad92576bb99536b87c8965c35b7786ab4daf1471afd2c9a5a9816b048",
+      "diff_file": "000001_aa25fe0ad92576bb99536b87c8965c35b7786ab4daf1471afd2c9a5a9816b048.diff.bin",
+      "subtree_file": "000001_aa25fe0ad92576bb99536b87c8965c35b7786ab4daf1471afd2c9a5a9816b048.subtree.bin",
+      "step_receipt": "000000_aa25fe0ad92576bb99536b87c8965c35b7786ab4daf1471afd2c9a5a9816b048.step.zk.bin",
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "aa25fe0ad92576bb99536b87c8965c35b7786ab4daf1471afd2c9a5a9816b048",
+      "post_diff_root": "2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c",
+      "diff_file": "000002_2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c.diff.bin",
+      "subtree_file": "000002_2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c.subtree.bin",
+      "step_receipt": "000001_2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c.step.zk.bin",
+      "aggregate_receipt": "000001_2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c.fold.zk.bin",
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c",
+      "post_diff_root": "11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a",
+      "diff_file": "000003_11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a.diff.bin",
+      "subtree_file": "000003_11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a.subtree.bin",
+      "step_receipt": null,
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a",
+      "post_diff_root": "02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a",
+      "diff_file": "000004_02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a.diff.bin",
+      "subtree_file": "000004_02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a.subtree.bin",
+      "step_receipt": null,
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a",
+      "post_diff_root": "ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22",
+      "diff_file": "000005_ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22.diff.bin",
+      "subtree_file": "000005_ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22.subtree.bin",
+      "step_receipt": null,
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    }
+  ],
+  "tip_receipt": "000001_2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c.fold.zk.bin",
+  "tip_receipt_groth16": null
+}

@@ -1,0 +1,9 @@
+{
+  "handle": "dictionary@mad",
+  "script_pubkey": "5120dcdb68cfa890b26a499d0e246aab98d383d0abe303edcf62a710b8af246843c1",
+  "anchor": "5ee0b77df30f9409d2ebe2a8d5efbac0a4b2a96af17bc810c15b8df4bfbed07c",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEtup2VpzyHt0yyKF3lhKnSRUQ3ipjVBI4Rs3EGlCFDYAIlEg3Ntoz6iQsmpJnQ4kaquY04PQq+MD7c9ipxC4ryRoQ8EC4CnuvEQKFVUrOEFAhD+h2rCQ1oDIxb9PhzcfSo8+VjUC1EoUzPSxV6Af9Al/DOvDTEvIhErpU+hRwERcsukqQSc="
+  }
+}

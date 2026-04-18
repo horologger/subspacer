@@ -1,0 +1,9 @@
+{
+  "handle": "admin@rad",
+  "script_pubkey": "51207fcef5a8b661f8bd16fd17e2d7184a28214f12dfaf05fb15479b10e66b56af98",
+  "anchor": "d3dbb0492482258bb068d0ff7137e2c40f3c8e25c479d70ade1a4cde5c7e725e",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJVyRbs2mva3ouQRQx/mvL4aGjUN7xsBltslgGYA0zY5gDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSB/zvWotmH4vRb9F+LXGEooIU8S368F+xVHmxDma1avmA=="
+  }
+}

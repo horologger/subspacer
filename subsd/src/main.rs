@@ -11,7 +11,7 @@ use axum::{
     extract::{Path as PathExtractor, State, Query, Multipart},
     http::{header, StatusCode, HeaderMap, HeaderValue},
     response::{Html, Json, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, delete, put},
     Router,
 };
 use base64::Engine;
@@ -58,6 +58,20 @@ struct JobStatusResponse {
 
 type JobStore = Arc<Mutex<HashMap<String, Job>>>;
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+struct CallbackRegistration {
+    /// Unique callback ID
+    id: String,
+    /// Callback URL to notify
+    callback_url: String,
+    /// List of subnames to watch (empty = watch all)
+    watched_subnames: Vec<String>,
+    /// Creation timestamp
+    created_at: u64,
+}
+
+type CallbackStore = Arc<Mutex<HashMap<String, Vec<CallbackRegistration>>>>;
+
 #[derive(Debug, Clone)]
 struct Config {
     spaced_rpc_url: String,
@@ -79,6 +93,7 @@ struct AppState {
     config: Config,
     jobs: JobStore,
     app_configs: AppConfigs,
+    callbacks: CallbackStore,
 }
 
 impl Config {
@@ -221,19 +236,35 @@ struct ErrorResponse {
     error: String,
 }
 
+/// Certificate request JSON body (anonymous add endpoint)
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
+struct CertRequestJsonBody {
+    /// Handle in the form `{subname}@{space_name}`
+    handle: String,
+    /// Hex-encoded script public key
+    script_pubkey: String,
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
         healthcheck,
         get_space_info,
         upload_space_req_file,
+        add_space_req_json,
         prove_space,
         get_job_status,
         get_subspace_cert,
         download_cert,
+        download_cert_json,
         upload_req_file,
         issue_cert,
-        discover_endpoints
+        discover_endpoints,
+        register_cert_callback,
+        unregister_cert_callback,
+        update_cert_watches,
+        get_cert_callback,
+        list_cert_callbacks
     ),
     components(schemas(
         HealthResponse,
@@ -241,9 +272,14 @@ struct ErrorResponse {
         SearchCertFile,
         DiscoveryResponse,
         ErrorResponse,
+        CertRequestJsonBody,
         JobResponse,
         JobStatusResponse,
-        JobStatus
+        JobStatus,
+        CallbackRegistration,
+        RegisterCallbackRequest,
+        UpdateWatchesRequest,
+        CallbackListResponse
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -489,6 +525,42 @@ async fn discover_endpoints(
             }],
             response_formats: vec!["html".to_string(), "json".to_string()],
             example_path: Some("/spaces/did".to_string()),
+        },
+        EndpointInfo {
+            path: "/spaces/{space_name}/add".to_string(),
+            method: "POST".to_string(),
+            description: "Anonymous JSON upload of a certificate request (same processing as /spaces/{space_name}/req but body is JSON with handle and script_pubkey; no authentication)".to_string(),
+            path_params: vec![ParamInfo {
+                name: "space_name".to_string(),
+                param_type: "string".to_string(),
+                required: true,
+                description: "Name of the space; must match the handle suffix".to_string(),
+            }],
+            query_params: vec![],
+            response_formats: vec!["json".to_string()],
+            example_path: Some("/spaces/bitcoin2026/add".to_string()),
+        },
+        EndpointInfo {
+            path: "/spaces/{space_name}/{subspace}/cert.json".to_string(),
+            method: "GET".to_string(),
+            description: "Get the subspace certificate file as inline JSON (same data as /cert without Basic Auth and without Content-Disposition attachment)".to_string(),
+            path_params: vec![
+                ParamInfo {
+                    name: "space_name".to_string(),
+                    param_type: "string".to_string(),
+                    required: true,
+                    description: "Name of the space".to_string(),
+                },
+                ParamInfo {
+                    name: "subspace".to_string(),
+                    param_type: "string".to_string(),
+                    required: true,
+                    description: "Subspace name (part before '@' in the handle)".to_string(),
+                },
+            ],
+            query_params: vec![],
+            response_formats: vec!["json".to_string()],
+            example_path: Some("/spaces/bitcoin2026/test/cert.json".to_string()),
         },
         EndpointInfo {
             path: "/spaces/{space_name}/{subspace}".to_string(),
@@ -1848,6 +1920,188 @@ fn subname_pricer(subname: &str) -> u64 {
     price_multiplier * 100000
 }
 
+/// Load callbacks from file for a space
+fn load_callbacks(data_dir: &str, space_name: &str) -> Vec<CallbackRegistration> {
+    let callbacks_file = Path::new(data_dir)
+        .join(space_name)
+        .join("callbacks.json");
+    
+    if !callbacks_file.exists() {
+        return Vec::new();
+    }
+    
+    match fs::read_to_string(&callbacks_file) {
+        Ok(content) => {
+            match serde_json::from_str::<Vec<CallbackRegistration>>(&content) {
+                Ok(callbacks) => callbacks,
+                Err(e) => {
+                    warn!("Failed to parse callbacks file {}: {}", callbacks_file.display(), e);
+                    Vec::new()
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to read callbacks file {}: {}", callbacks_file.display(), e);
+            Vec::new()
+        }
+    }
+}
+
+/// Save callbacks to file for a space
+fn save_callbacks(data_dir: &str, space_name: &str, callbacks: &[CallbackRegistration]) -> Result<()> {
+    let space_dir = Path::new(data_dir).join(space_name);
+    
+    // Ensure space directory exists
+    fs::create_dir_all(&space_dir)
+        .context("Failed to create space directory")?;
+    
+    let callbacks_file = space_dir.join("callbacks.json");
+    let json_content = serde_json::to_string_pretty(callbacks)
+        .context("Failed to serialize callbacks")?;
+    
+    fs::write(&callbacks_file, json_content)
+        .context("Failed to write callbacks file")?;
+    
+    Ok(())
+}
+
+/// Load all callbacks from filesystem
+fn load_all_callbacks(data_dir: &str) -> HashMap<String, Vec<CallbackRegistration>> {
+    let mut callbacks_map = HashMap::new();
+    
+    let data_path = Path::new(data_dir);
+    if !data_path.exists() {
+        return callbacks_map;
+    }
+    
+    match fs::read_dir(data_path) {
+        Ok(entries) => {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Some(space_name) = path.file_name().and_then(|n| n.to_str()) {
+                            let callbacks = load_callbacks(data_dir, space_name);
+                            if !callbacks.is_empty() {
+                                callbacks_map.insert(space_name.to_string(), callbacks);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to read data directory {}: {}", data_dir, e);
+        }
+    }
+    
+    callbacks_map
+}
+
+/// Check if a callback should be triggered for a subspace
+fn should_trigger_callback(callback: &CallbackRegistration, subspace: Option<&str>) -> bool {
+    // Empty watched_subnames means watch all subspaces
+    if callback.watched_subnames.is_empty() {
+        return true;
+    }
+    
+    // If subspace is None, only trigger if watching all (already handled above)
+    if let Some(subspace) = subspace {
+        callback.watched_subnames.contains(&subspace.to_string())
+    } else {
+        false
+    }
+}
+
+/// Execute a single callback HTTP request
+async fn execute_callback(callback_url: &str, payload: &serde_json::Value) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
+    
+    let response = client
+        .post(callback_url)
+        .json(payload)
+        .send()
+        .await
+        .context("Failed to send callback request")?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Callback returned status {}: {}", status, body);
+    }
+    
+    Ok(())
+}
+
+/// Execute callback with exponential backoff retry
+async fn execute_callback_with_retry(
+    callback_url: &str,
+    payload: &serde_json::Value,
+    max_attempts: usize,
+) {
+    let mut delay = 1u64; // Start with 1 second
+    
+    for attempt in 1..=max_attempts {
+        match execute_callback(callback_url, payload).await {
+            Ok(_) => {
+                info!("Callback executed successfully: {} (attempt {})", callback_url, attempt);
+                return;
+            }
+            Err(e) => {
+                warn!("Callback execution failed (attempt {}/{}): {} - {}", attempt, max_attempts, callback_url, e);
+                if attempt < max_attempts {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                    delay *= 2; // Exponential backoff: 1s, 2s, 4s
+                } else {
+                    error!("Callback execution failed after {} attempts: {}", max_attempts, callback_url);
+                }
+            }
+        }
+    }
+}
+
+/// Trigger callbacks for a space and optional subspace
+async fn trigger_callbacks(
+    callbacks: CallbackStore,
+    space_name: &str,
+    subspace: Option<&str>,
+    event_type: &str,
+    event_data: serde_json::Value,
+) {
+    let callbacks_map = callbacks.lock().await;
+    
+    if let Some(space_callbacks) = callbacks_map.get(space_name) {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        let payload = serde_json::json!({
+            "event_type": event_type,
+            "space_name": space_name,
+            "subspace": subspace,
+            "handle": subspace.map(|s| format!("{}@{}", s, space_name)),
+            "timestamp": timestamp,
+            "event_data": event_data,
+        });
+        
+        for callback in space_callbacks {
+            if should_trigger_callback(callback, subspace) {
+                let callback_url = callback.callback_url.clone();
+                let payload_clone = payload.clone();
+                
+                // Execute callback asynchronously without blocking
+                tokio::spawn(async move {
+                    execute_callback_with_retry(&callback_url, &payload_clone, 3).await;
+                });
+            }
+        }
+    }
+}
+
 /// Verify Basic Authentication credentials
 fn verify_basic_auth(headers: &HeaderMap, expected_user: &str, expected_password: &str) -> bool {
     let auth_header = match headers.get(header::AUTHORIZATION) {
@@ -2008,6 +2262,69 @@ async fn download_cert(
         .into_response()
 }
 
+/// Get subspace certificate as inline JSON (same file as `/cert`, no Basic Auth, no download attachment)
+#[utoipa::path(
+    get,
+    path = "/spaces/{space_name}/{subspace}/cert.json",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space"),
+        ("subspace" = String, Path, description = "Name of the subspace")
+    ),
+    responses(
+        (status = 200, description = "Certificate JSON"),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Read error or invalid JSON in certificate file", body = ErrorResponse)
+    )
+)]
+async fn download_cert_json(
+    PathExtractor((space_name, subspace)): PathExtractor<(String, String)>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let cert_file_name = format!("{}@{}.cert.json", subspace, space_name);
+    let cert_file_path = Path::new(&state.config.data_dir)
+        .join(&space_name)
+        .join(&cert_file_name);
+
+    if !cert_file_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Certificate file not found: {}", cert_file_name),
+            }),
+        )
+            .into_response();
+    }
+
+    let cert_content = match fs::read_to_string(&cert_file_path) {
+        Ok(content) => content,
+        Err(e) => {
+            error!("Failed to read cert file {}: {}", cert_file_path.display(), e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read certificate file: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match serde_json::from_str::<serde_json::Value>(&cert_content) {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(e) => {
+            error!("Invalid JSON in cert file {}: {}", cert_file_path.display(), e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Certificate file contains invalid JSON: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Issue certificate endpoint - issues certificate and returns it as download
 /// Requires Basic Authentication
 #[utoipa::path(
@@ -2116,6 +2433,32 @@ async fn issue_cert(
                 .into_response();
         }
     };
+
+    // Parse certificate to get anchor for callback
+    let cert_data: serde_json::Value = match serde_json::from_str(&cert_content) {
+        Ok(data) => data,
+        Err(_) => serde_json::json!({}),
+    };
+
+    // Trigger callbacks for certificate issued event
+    let callbacks_clone = state.callbacks.clone();
+    let space_name_clone = space_name.clone();
+    let subspace_clone = subspace.clone();
+    let cert_file_name_clone = cert_file_name.clone();
+    let anchor = cert_data.get("anchor").and_then(|a| a.as_str()).unwrap_or("").to_string();
+    tokio::spawn(async move {
+        trigger_callbacks(
+            callbacks_clone,
+            &space_name_clone,
+            Some(&subspace_clone),
+            "certificate_issued",
+            serde_json::json!({
+                "cert_file": cert_file_name_clone,
+                "anchor": anchor,
+            }),
+        )
+        .await;
+    });
 
     // Return the certificate file with appropriate headers for download
     Response::builder()
@@ -2248,6 +2591,24 @@ async fn upload_req_file(
 
     info!("Uploaded certificate request file: {}", req_file_path.display());
 
+    // Trigger callbacks for request uploaded event
+    let callbacks_clone = state.callbacks.clone();
+    let space_name_clone = space_name.clone();
+    let subspace_clone = subspace.clone();
+    let req_file_name_clone = req_file_name.clone();
+    tokio::spawn(async move {
+        trigger_callbacks(
+            callbacks_clone.clone(),
+            &space_name_clone,
+            Some(&subspace_clone),
+            "request_uploaded",
+            serde_json::json!({
+                "req_file": req_file_name_clone,
+            }),
+        )
+        .await;
+    });
+
     // Execute "subs add ." command in the space directory
     let output = match tokio::process::Command::new("subs")
         .arg("add")
@@ -2286,7 +2647,28 @@ async fn upload_req_file(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout_str = stdout.to_string();
     info!("'subs add .' command succeeded: {}", stdout);
+
+    // Trigger callbacks for request added event
+    let callbacks_clone = state.callbacks.clone();
+    let space_name_clone = space_name.clone();
+    let subspace_clone = subspace.clone();
+    let req_file_name_clone = req_file_name.clone();
+    let stdout_clone = stdout_str.clone();
+    tokio::spawn(async move {
+        trigger_callbacks(
+            callbacks_clone,
+            &space_name_clone,
+            Some(&subspace_clone),
+            "request_added",
+            serde_json::json!({
+                "req_file": req_file_name_clone,
+                "subs_output": stdout_clone.trim(),
+            }),
+        )
+        .await;
+    });
 
     (
         StatusCode::OK,
@@ -2437,6 +2819,24 @@ async fn upload_space_req_file(
             info!("Uploaded certificate request file: {}", req_file_path.display());
             file_saved = true;
             saved_filename = filename.clone();
+
+            // Trigger callbacks for request uploaded event
+            let callbacks_clone = state.callbacks.clone();
+            let space_name_clone = space_name.clone();
+            let subname_clone = subname.clone();
+            let filename_clone = filename.clone();
+            tokio::spawn(async move {
+                trigger_callbacks(
+                    callbacks_clone.clone(),
+                    &space_name_clone,
+                    Some(&subname_clone),
+                    "request_uploaded",
+                    serde_json::json!({
+                        "req_file": filename_clone,
+                    }),
+                )
+                .await;
+            });
         }
     }
 
@@ -2498,7 +2898,36 @@ async fn upload_space_req_file(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout_str = stdout.to_string();
     info!("'subs add .' command succeeded: {}", stdout);
+
+    // Extract subname from saved_filename for callback
+    let subname = saved_filename
+        .strip_suffix(&format!("@{}.req.json", space_name))
+        .unwrap_or("")
+        .to_string();
+
+    // Trigger callbacks for request added event
+    if !subname.is_empty() {
+        let callbacks_clone = state.callbacks.clone();
+        let space_name_clone = space_name.clone();
+        let subname_clone = subname.clone();
+        let saved_filename_clone = saved_filename.clone();
+        let stdout_clone = stdout_str.clone();
+        tokio::spawn(async move {
+            trigger_callbacks(
+                callbacks_clone,
+                &space_name_clone,
+                Some(&subname_clone),
+                "request_added",
+                serde_json::json!({
+                    "req_file": saved_filename_clone,
+                    "subs_output": stdout_clone.trim(),
+                }),
+            )
+            .await;
+        });
+    }
 
     (
         StatusCode::OK,
@@ -2506,6 +2935,201 @@ async fn upload_space_req_file(
             "success": true,
             "message": "Certificate request file uploaded and processed successfully",
             "file_path": saved_filename,
+            "subs_output": stdout.trim()
+        })),
+    )
+        .into_response()
+}
+
+/// Anonymous JSON upload: same as POST /spaces/{space_name}/req but with a JSON body and no auth.
+#[utoipa::path(
+    post,
+    path = "/spaces/{space_name}/add",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space")
+    ),
+    request_body(
+        content = CertRequestJsonBody,
+        description = "Certificate request (handle + script_pubkey)",
+        content_type = "application/json"
+    ),
+    responses(
+        (status = 200, description = "File saved and subs add completed"),
+        (status = 400, description = "Bad request"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+async fn add_space_req_json(
+    PathExtractor(space_name): PathExtractor<String>,
+    State(state): State<AppState>,
+    Json(body): Json<CertRequestJsonBody>,
+) -> impl IntoResponse {
+    let parts: Vec<&str> = body.handle.split('@').collect();
+    if parts.len() != 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "handle must be exactly one @ separating subname and space (e.g. admin@bitcoin2026)"
+            })),
+        )
+            .into_response();
+    }
+    let subname = parts[0];
+    let space_from_handle = parts[1];
+    if subname.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "subname in handle cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+    if space_from_handle != space_name.as_str() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!(
+                    "handle space '{}' does not match path space_name '{}'",
+                    space_from_handle, space_name
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let filename = format!("{}@{}.req.json", subname, space_name);
+    let space_dir = Path::new(&state.config.data_dir).join(&space_name);
+
+    if let Err(e) = fs::create_dir_all(&space_dir) {
+        error!("Failed to create space directory {}: {}", space_dir.display(), e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to create space directory: {}", e)
+            })),
+        )
+            .into_response();
+    }
+
+    let json_content = match serde_json::to_string_pretty(&body) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to serialize request: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let req_file_path = space_dir.join(&filename);
+    if let Err(e) = fs::write(&req_file_path, &json_content) {
+        error!("Failed to write req file {}: {}", req_file_path.display(), e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to save certificate request file: {}", e)
+            })),
+        )
+            .into_response();
+    }
+
+    info!("Uploaded certificate request file (anonymous): {}", req_file_path.display());
+
+    let callbacks_clone = state.callbacks.clone();
+    let space_name_clone = space_name.clone();
+    let subname_owned = subname.to_string();
+    let filename_clone = filename.clone();
+    tokio::spawn(async move {
+        trigger_callbacks(
+            callbacks_clone.clone(),
+            &space_name_clone,
+            Some(&subname_owned),
+            "request_uploaded",
+            serde_json::json!({
+                "req_file": filename_clone,
+            }),
+        )
+        .await;
+    });
+
+    let output = match tokio::process::Command::new("subs")
+        .arg("add")
+        .arg(".")
+        .current_dir(&space_dir)
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(e) => {
+            error!("Failed to execute 'subs add .' command: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to execute 'subs add .' command: {}", e),
+                    "file_uploaded": true,
+                    "file_path": filename
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("'subs add .' command failed: {}", stderr);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("'subs add .' command failed: {}", stderr),
+                "file_uploaded": true,
+                "file_path": filename
+            })),
+        )
+            .into_response();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout_str = stdout.to_string();
+    info!("'subs add .' command succeeded: {}", stdout);
+
+    let callbacks_clone = state.callbacks.clone();
+    let space_name_clone = space_name.clone();
+    let subname_clone = subname.to_string();
+    let filename_clone = filename.clone();
+    let stdout_clone = stdout_str.clone();
+    tokio::spawn(async move {
+        trigger_callbacks(
+            callbacks_clone,
+            &space_name_clone,
+            Some(&subname_clone),
+            "request_added",
+            serde_json::json!({
+                "req_file": filename_clone,
+                "subs_output": stdout_clone.trim(),
+            }),
+        )
+        .await;
+    });
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "message": "Certificate request file uploaded and processed successfully",
+            "file_path": filename,
             "subs_output": stdout.trim()
         })),
     )
@@ -2527,6 +3151,7 @@ async fn execute_prove_job(
     space_name: String,
     space_dir: std::path::PathBuf,
     jobs: JobStore,
+    callbacks: CallbackStore,
 ) {
     // Update job status to Processing
     {
@@ -2637,15 +3262,41 @@ async fn execute_prove_job(
         .as_secs();
 
     let mut jobs_map = jobs.lock().await;
-    if let Some(job) = jobs_map.get_mut(&job_id) {
-        if error_message.is_some() {
-            job.status = JobStatus::Failed(error_message.clone().unwrap());
-            job.error = error_message;
+    let job_completed = if let Some(job) = jobs_map.get_mut(&job_id) {
+        let completed = error_message.is_none();
+        if let Some(err_msg) = error_message.clone() {
+            job.status = JobStatus::Failed(err_msg.clone());
+            job.error = Some(err_msg);
         } else {
             job.status = JobStatus::Completed;
         }
         job.completed_at = Some(completed_at);
         job.result = Some(serde_json::json!({ "steps": results }));
+        completed
+    } else {
+        false
+    };
+
+    // Trigger callbacks for prove completed event
+    let error_message_clone = error_message.clone();
+    if job_completed && error_message_clone.is_none() {
+        let callbacks_clone = callbacks.clone();
+        let space_name_clone = space_name.clone();
+        let job_id_clone = job_id.clone();
+        let results_clone = results.clone();
+        tokio::spawn(async move {
+            trigger_callbacks(
+                callbacks_clone,
+                &space_name_clone,
+                None, // Prove completion is space-level, not subspace-specific
+                "prove_completed",
+                serde_json::json!({
+                    "job_id": job_id_clone,
+                    "steps": results_clone,
+                }),
+            )
+            .await;
+        });
     }
 }
 
@@ -2728,9 +3379,10 @@ async fn prove_space(
 
     // Spawn background task
     let jobs_clone = state.jobs.clone();
+    let callbacks_clone = state.callbacks.clone();
     let job_id_clone = job_id.clone();
     tokio::spawn(async move {
-        execute_prove_job(job_id_clone, space_name, space_dir, jobs_clone).await;
+        execute_prove_job(job_id_clone, space_name, space_dir, jobs_clone, callbacks_clone).await;
     });
 
     // Return job response
@@ -2801,6 +3453,430 @@ async fn get_job_status(
     }
 }
 
+#[derive(Serialize, Deserialize, ToSchema)]
+struct RegisterCallbackRequest {
+    /// Callback URL to notify
+    callback_url: String,
+    /// List of subnames to watch (empty = watch all)
+    watched_subnames: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+struct UpdateWatchesRequest {
+    /// Updated list of subnames to watch (empty = watch all)
+    watched_subnames: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+struct CallbackListResponse {
+    /// Space name
+    space_name: String,
+    /// List of callbacks
+    callbacks: Vec<CallbackRegistration>,
+}
+
+/// Register certificate callback endpoint
+/// Requires Basic Authentication
+#[utoipa::path(
+    post,
+    path = "/api/spaces/{space_name}/callbacks/register",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space")
+    ),
+    request_body(
+        content = RegisterCallbackRequest,
+        description = "Callback registration request",
+        content_type = "application/json"
+    ),
+    responses(
+        (status = 200, description = "Callback registered successfully", body = CallbackRegistration),
+        (status = 401, description = "Unauthorized"),
+        (status = 400, description = "Bad request")
+    ),
+    security(
+        ("basic" = [])
+    )
+)]
+async fn register_cert_callback(
+    PathExtractor(space_name): PathExtractor<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(request): Json<RegisterCallbackRequest>,
+) -> impl IntoResponse {
+    // Verify Basic Auth
+    if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"subsd\""),
+            )],
+            Json(serde_json::json!({
+                "error": "Unauthorized"
+            })),
+        )
+            .into_response();
+    }
+
+    // Validate callback URL
+    if request.callback_url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "callback_url cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+
+    // Generate unique callback ID
+    let callback_id = format!(
+        "{}_{}",
+        space_name,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let callback = CallbackRegistration {
+        id: callback_id.clone(),
+        callback_url: request.callback_url.clone(),
+        watched_subnames: request.watched_subnames.clone(),
+        created_at,
+    };
+
+    // Add to in-memory store
+    {
+        let mut callbacks_map = state.callbacks.lock().await;
+        let space_callbacks = callbacks_map.entry(space_name.clone()).or_insert_with(Vec::new);
+        space_callbacks.push(callback.clone());
+    }
+
+    // Save to file
+    {
+        let callbacks_map = state.callbacks.lock().await;
+        if let Some(space_callbacks) = callbacks_map.get(&space_name) {
+            if let Err(e) = save_callbacks(&state.config.data_dir, &space_name, space_callbacks) {
+                error!("Failed to save callbacks for space {}: {}", space_name, e);
+                // Remove from memory if save failed
+                let mut callbacks_map = state.callbacks.lock().await;
+                if let Some(space_callbacks) = callbacks_map.get_mut(&space_name) {
+                    space_callbacks.retain(|c| c.id != callback_id);
+                }
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to save callback: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    info!("Registered callback {} for space {}", callback_id, space_name);
+    (StatusCode::OK, Json(callback)).into_response()
+}
+
+/// Unregister certificate callback endpoint
+/// Requires Basic Authentication
+#[utoipa::path(
+    delete,
+    path = "/api/spaces/{space_name}/callbacks/{callback_id}",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space"),
+        ("callback_id" = String, Path, description = "Callback ID to unregister")
+    ),
+    responses(
+        (status = 200, description = "Callback unregistered successfully"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Callback not found")
+    ),
+    security(
+        ("basic" = [])
+    )
+)]
+async fn unregister_cert_callback(
+    PathExtractor((space_name, callback_id)): PathExtractor<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // Verify Basic Auth
+    if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"subsd\""),
+            )],
+            Json(serde_json::json!({
+                "error": "Unauthorized"
+            })),
+        )
+            .into_response();
+    }
+
+    // Remove from in-memory store
+    let removed = {
+        let mut callbacks_map = state.callbacks.lock().await;
+        if let Some(space_callbacks) = callbacks_map.get_mut(&space_name) {
+            let initial_len = space_callbacks.len();
+            space_callbacks.retain(|c| c.id != callback_id);
+            initial_len != space_callbacks.len()
+        } else {
+            false
+        }
+    };
+
+    if !removed {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Callback '{}' not found for space '{}'", callback_id, space_name)
+            })),
+        )
+            .into_response();
+    }
+
+    // Save to file
+    {
+        let callbacks_map = state.callbacks.lock().await;
+        if let Some(space_callbacks) = callbacks_map.get(&space_name) {
+            if let Err(e) = save_callbacks(&state.config.data_dir, &space_name, space_callbacks) {
+                error!("Failed to save callbacks for space {}: {}", space_name, e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to save callbacks: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    info!("Unregistered callback {} for space {}", callback_id, space_name);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "message": format!("Callback '{}' unregistered", callback_id)
+        })),
+    )
+        .into_response()
+}
+
+/// Update certificate callback watches endpoint
+/// Requires Basic Authentication
+#[utoipa::path(
+    put,
+    path = "/api/spaces/{space_name}/callbacks/{callback_id}/watches",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space"),
+        ("callback_id" = String, Path, description = "Callback ID to update")
+    ),
+    request_body(
+        content = UpdateWatchesRequest,
+        description = "Updated watch list",
+        content_type = "application/json"
+    ),
+    responses(
+        (status = 200, description = "Watches updated successfully", body = CallbackRegistration),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Callback not found")
+    ),
+    security(
+        ("basic" = [])
+    )
+)]
+async fn update_cert_watches(
+    PathExtractor((space_name, callback_id)): PathExtractor<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(request): Json<UpdateWatchesRequest>,
+) -> impl IntoResponse {
+    // Verify Basic Auth
+    if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"subsd\""),
+            )],
+            Json(serde_json::json!({
+                "error": "Unauthorized"
+            })),
+        )
+            .into_response();
+    }
+
+    // Update in-memory store
+    let updated_callback = {
+        let mut callbacks_map = state.callbacks.lock().await;
+        if let Some(space_callbacks) = callbacks_map.get_mut(&space_name) {
+            if let Some(callback) = space_callbacks.iter_mut().find(|c| c.id == callback_id) {
+                callback.watched_subnames = request.watched_subnames.clone();
+                Some(callback.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let callback = match updated_callback {
+        Some(cb) => cb,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("Callback '{}' not found for space '{}'", callback_id, space_name)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Save to file
+    {
+        let callbacks_map = state.callbacks.lock().await;
+        if let Some(space_callbacks) = callbacks_map.get(&space_name) {
+            if let Err(e) = save_callbacks(&state.config.data_dir, &space_name, space_callbacks) {
+                error!("Failed to save callbacks for space {}: {}", space_name, e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to save callbacks: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    info!("Updated watches for callback {} in space {}", callback_id, space_name);
+    (StatusCode::OK, Json(callback)).into_response()
+}
+
+/// Get certificate callback endpoint
+/// Requires Basic Authentication
+#[utoipa::path(
+    get,
+    path = "/api/spaces/{space_name}/callbacks/{callback_id}",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space"),
+        ("callback_id" = String, Path, description = "Callback ID")
+    ),
+    responses(
+        (status = 200, description = "Callback details", body = CallbackRegistration),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Callback not found")
+    ),
+    security(
+        ("basic" = [])
+    )
+)]
+async fn get_cert_callback(
+    PathExtractor((space_name, callback_id)): PathExtractor<(String, String)>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // Verify Basic Auth
+    if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"subsd\""),
+            )],
+            Json(serde_json::json!({
+                "error": "Unauthorized"
+            })),
+        )
+            .into_response();
+    }
+
+    let callbacks_map = state.callbacks.lock().await;
+    
+    if let Some(space_callbacks) = callbacks_map.get(&space_name) {
+        if let Some(callback) = space_callbacks.iter().find(|c| c.id == callback_id) {
+            return (StatusCode::OK, Json(callback.clone())).into_response();
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": format!("Callback '{}' not found for space '{}'", callback_id, space_name)
+        })),
+    )
+        .into_response()
+}
+
+/// List certificate callbacks endpoint
+/// Requires Basic Authentication
+#[utoipa::path(
+    get,
+    path = "/api/spaces/{space_name}/callbacks",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Name of the space")
+    ),
+    responses(
+        (status = 200, description = "List of callbacks", body = CallbackListResponse),
+        (status = 401, description = "Unauthorized")
+    ),
+    security(
+        ("basic" = [])
+    )
+)]
+async fn list_cert_callbacks(
+    PathExtractor(space_name): PathExtractor<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // Verify Basic Auth
+    if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"subsd\""),
+            )],
+            Json(serde_json::json!({
+                "error": "Unauthorized"
+            })),
+        )
+            .into_response();
+    }
+
+    let callbacks_map = state.callbacks.lock().await;
+    let callbacks = callbacks_map
+        .get(&space_name)
+        .cloned()
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(CallbackListResponse {
+            space_name: space_name.clone(),
+            callbacks,
+        }),
+    )
+        .into_response()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
@@ -2850,11 +3926,16 @@ async fn main() -> Result<()> {
     app_configs_map.insert("other-wallet".to_string(), vec!["usdc".to_string(), "eth".to_string(), "btc".to_string()]);
     let app_configs: AppConfigs = Arc::new(Mutex::new(app_configs_map));
 
+    // Initialize callback store and load from filesystem
+    let callbacks: CallbackStore = Arc::new(Mutex::new(load_all_callbacks(&config.data_dir)));
+    info!("Loaded {} space(s) with callbacks", callbacks.lock().await.len());
+
     // Create app state
     let app_state = AppState {
         config: config.clone(),
         jobs: jobs.clone(),
         app_configs: app_configs.clone(),
+        callbacks: callbacks.clone(),
     };
 
     // Build the application router
@@ -2871,11 +3952,18 @@ async fn main() -> Result<()> {
         .route("/spaces/:space_name", get(get_space_info))
         .route("/spaces/:space_name/cert", get(download_root_cert))
         .route("/spaces/:space_name/req", post(upload_space_req_file))
+        .route("/spaces/:space_name/add", post(add_space_req_json))
         .route("/spaces/:space_name/prove", post(prove_space))
         .route("/spaces/:space_name/:subspace", get(get_subspace_cert))
+        .route("/spaces/:space_name/:subspace/cert.json", get(download_cert_json))
         .route("/spaces/:space_name/:subspace/cert", get(download_cert))
         .route("/spaces/:space_name/:subspace/req", post(upload_req_file))
         .route("/spaces/:space_name/:subspace/issue", post(issue_cert))
+        .route("/api/spaces/:space_name/callbacks/register", post(register_cert_callback))
+        .route("/api/spaces/:space_name/callbacks", get(list_cert_callbacks))
+        .route("/api/spaces/:space_name/callbacks/:callback_id", get(get_cert_callback))
+        .route("/api/spaces/:space_name/callbacks/:callback_id", delete(unregister_cert_callback))
+        .route("/api/spaces/:space_name/callbacks/:callback_id/watches", put(update_cert_watches))
         .route("/jobs/:job_id", get(get_job_status))
         .with_state(app_state);
 

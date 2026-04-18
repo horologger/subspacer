@@ -1,0 +1,9 @@
+{
+  "handle": "otherz@bitcoin2026",
+  "script_pubkey": "512079b4e497ef23074f0772fdcd541ae0e3eee753d4b325311dbaf14585b61a9b13",
+  "anchor": "ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIfziLu2Ct6ZQalKnjyHN09e7VezLhowpAEBhDJrF2eKAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAhvsGgqAfLZyfeQIJiP6OSDalqfopsfQPvnRtDsBkDdgAIlEgebTkl+8jB08Hcv3NVBrg4+7nU9SzJTEduvFFhbYamxMCZ+04hOlmJ0i5qA5CVuw5QU/+5flAkOYl2XaD2tMnniM="
+  }
+}

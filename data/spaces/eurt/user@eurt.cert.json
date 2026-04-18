@@ -1,0 +1,9 @@
+{
+  "handle": "user@eurt",
+  "script_pubkey": "5120a3592a865083110cd5f0a7393f9ae2d36520da294e8d5c08ed542c87ebaf492d",
+  "anchor": "5270c4655ccf4f54965071e53ba302e973d36fc893255b4bd74f5bcdb19312f5",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo7AypeH1YNHXEX4Oyl04oCKBK8h7tdub06XQSOYjmzgAiUSCjWSqGUIMRDNXwpzk/muLTZSDaKU6NXAjtVCyH669JLQLuxqAv9UR7hkjqUCoaIOXFY8aHVwzLe1h+Kdgh38wzDQ=="
+  }
+}

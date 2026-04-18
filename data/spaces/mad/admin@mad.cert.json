@@ -1,0 +1,9 @@
+{
+  "handle": "admin@mad",
+  "script_pubkey": "512088e84b6510e6ebc44f3eadb2b993902053f635a9f1e8fc2262d21db21ca63c24",
+  "anchor": "c638fdd4eb7d529e1d9f7ed9dc1a81f9ba3e86558b66925c765adc93bfcef76d",
+  "witness": {
+    "type": "subtree",
+    "data": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALgKe68RAoVVSs4QUCEP6HasJDWgMjFv0+HNx9Kjz5WNQDOWkBmSBiO4kkrJi5JnduY7i1T9fTb2aaqgEMf8jS3AQAiUSCI6EtlEObrxE8+rbK5k5AgU/Y1qfHo/CJi0h2yHKY8JA=="
+  }
+}

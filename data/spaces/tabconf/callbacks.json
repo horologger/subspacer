@@ -1,0 +1,12 @@
+[
+  {
+    "id": "tabconf_1768182613",
+    "callback_url": "http://127.0.0.1/callme",
+    "watched_subnames": [
+      "this",
+      "that",
+      "other"
+    ],
+    "created_at": 1768182613
+  }
+]

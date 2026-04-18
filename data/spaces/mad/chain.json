@@ -1,0 +1,35 @@
+{
+  "version": 0,
+  "space": "@mad",
+  "entries": [
+    {
+      "pre_diff_root": null,
+      "post_diff_root": "d44a14ccf4b157a01ff4097f0cebc34c4bc8844ae953e851c0445cb2e92a4127",
+      "diff_file": "000000_d44a14ccf4b157a01ff4097f0cebc34c4bc8844ae953e851c0445cb2e92a4127.diff.bin",
+      "subtree_file": null,
+      "step_receipt": null,
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "d44a14ccf4b157a01ff4097f0cebc34c4bc8844ae953e851c0445cb2e92a4127",
+      "post_diff_root": "c638fdd4eb7d529e1d9f7ed9dc1a81f9ba3e86558b66925c765adc93bfcef76d",
+      "diff_file": "000001_c638fdd4eb7d529e1d9f7ed9dc1a81f9ba3e86558b66925c765adc93bfcef76d.diff.bin",
+      "subtree_file": "000001_c638fdd4eb7d529e1d9f7ed9dc1a81f9ba3e86558b66925c765adc93bfcef76d.subtree.bin",
+      "step_receipt": "000000_c638fdd4eb7d529e1d9f7ed9dc1a81f9ba3e86558b66925c765adc93bfcef76d.step.zk.bin",
+      "aggregate_receipt": null,
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "c638fdd4eb7d529e1d9f7ed9dc1a81f9ba3e86558b66925c765adc93bfcef76d",
+      "post_diff_root": "5ee0b77df30f9409d2ebe2a8d5efbac0a4b2a96af17bc810c15b8df4bfbed07c",
+      "diff_file": "000002_5ee0b77df30f9409d2ebe2a8d5efbac0a4b2a96af17bc810c15b8df4bfbed07c.diff.bin",
+      "subtree_file": "000002_5ee0b77df30f9409d2ebe2a8d5efbac0a4b2a96af17bc810c15b8df4bfbed07c.subtree.bin",
+      "step_receipt": "000001_5ee0b77df30f9409d2ebe2a8d5efbac0a4b2a96af17bc810c15b8df4bfbed07c.step.zk.bin",
+      "aggregate_receipt": "000001_5ee0b77df30f9409d2ebe2a8d5efbac0a4b2a96af17bc810c15b8df4bfbed07c.fold.zk.bin",
+      "aggregate_groth16": null
+    }
+  ],
+  "tip_receipt": "000001_5ee0b77df30f9409d2ebe2a8d5efbac0a4b2a96af17bc810c15b8df4bfbed07c.fold.zk.bin",
+  "tip_receipt_groth16": null
+}
