@@ -1,9 +1,9 @@
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use anyhow::{Context, Result};
@@ -17,6 +17,8 @@ use axum::{
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
+use chrono::Local;
+use tower_http::cors::CorsLayer;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -164,7 +166,9 @@ struct SearchCertFile {
 struct CommitmentResponse {
     state_root: String,
     prev_root: Option<String>,
-    history_hash: String,
+    /// Spaced returns `rolling_hash`; older nodes may use `history_hash`.
+    #[serde(alias = "history_hash")]
+    rolling_hash: String,
     block_height: u64,
 }
 
@@ -245,6 +249,17 @@ struct CertRequestJsonBody {
     script_pubkey: String,
 }
 
+#[derive(Deserialize, Debug, ToSchema)]
+struct FindHandlesRequest {
+    script_pubkeys: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone, ToSchema)]
+struct HandlePubkeyMatch {
+    handle: String,
+    script_pubkey: String,
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -264,7 +279,10 @@ struct CertRequestJsonBody {
         unregister_cert_callback,
         update_cert_watches,
         get_cert_callback,
-        list_cert_callbacks
+        list_cert_callbacks,
+        api_find_handles,
+        backup_space,
+        restore_space
     ),
     components(schemas(
         HealthResponse,
@@ -273,6 +291,8 @@ struct CertRequestJsonBody {
         DiscoveryResponse,
         ErrorResponse,
         CertRequestJsonBody,
+        FindHandlesRequest,
+        HandlePubkeyMatch,
         JobResponse,
         JobStatusResponse,
         JobStatus,
@@ -311,6 +331,449 @@ async fn healthcheck(_state: State<AppState>) -> Json<HealthResponse> {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Reject path separators and `..` in `{space_name}` path segments.
+fn is_safe_space_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+}
+
+/// `data/spaces_backups` — sibling of `SUBSD_DATA_DIR` when it is `.../data/spaces`.
+fn spaces_backups_dir(data_dir: &str) -> PathBuf {
+    let p = Path::new(data_dir);
+    match p.parent() {
+        Some(parent) => parent.join("spaces_backups"),
+        None => PathBuf::from("spaces_backups"),
+    }
+}
+
+/// `data/scanned-pubkeys.csv` lives beside the spaces dir (parent of `SUBSD_DATA_DIR`).
+fn scanned_pubkeys_csv_path(data_dir: &str) -> PathBuf {
+    let p = Path::new(data_dir);
+    match p.parent() {
+        Some(parent) => parent.join("scanned-pubkeys.csv"),
+        None => PathBuf::from("scanned-pubkeys.csv"),
+    }
+}
+
+/// Same line split as `find-handles` script: first comma separates handle from script_pubkey.
+fn parse_scanned_csv_line(line: &str) -> Option<(String, String)> {
+    let i = line.find(',')?;
+    let handle = line[..i].to_string();
+    let pubkey = line[i + 1..].to_string();
+    Some((handle, pubkey))
+}
+
+/// Anonymous lookup: script pubkeys → rows from `scanned-pubkeys.csv` (POST + JSON body).
+/// POST is required so browsers can send a body (`fetch` forbids bodies on GET).
+#[utoipa::path(
+    post,
+    path = "/api/spaces/find-handles",
+    tag = "spaces",
+    request_body(content = FindHandlesRequest, content_type = "application/json"),
+    responses(
+        (status = 200, description = "Matched handle/script_pubkey pairs", body = Vec<HandlePubkeyMatch>),
+        (status = 404, description = "scanned-pubkeys.csv not found", body = ErrorResponse),
+        (status = 500, description = "Failed to read CSV", body = ErrorResponse)
+    )
+)]
+async fn api_find_handles(
+    State(state): State<AppState>,
+    Json(body): Json<FindHandlesRequest>,
+) -> impl IntoResponse {
+    let csv_path = scanned_pubkeys_csv_path(&state.config.data_dir);
+    if !csv_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!(
+                    "scanned pubkeys file not found at {} (run scan-script-pubkeys)",
+                    csv_path.display()
+                ),
+            }),
+        )
+            .into_response();
+    }
+
+    let content = match fs::read_to_string(&csv_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to read {}: {}", csv_path.display(), e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read {}: {}", csv_path.display(), e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let wanted: HashSet<String> = body.script_pubkeys.into_iter().collect();
+    let mut out: Vec<HandlePubkeyMatch> = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((handle, pubkey)) = parse_scanned_csv_line(line) {
+            if wanted.contains(&pubkey) {
+                out.push(HandlePubkeyMatch {
+                    handle,
+                    script_pubkey: pubkey,
+                });
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+/// Tar the space directory; save archive under `data/spaces_backups/`, then return it as a download (Basic Auth).
+#[utoipa::path(
+    get,
+    path = "/spaces/{space_name}/backup",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Space folder name")
+    ),
+    responses(
+        (status = 200, description = "application/x-tar attachment"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Space not found"),
+        (status = 500, description = "tar or IO error")
+    ),
+    security(
+        ("basic" = [])
+    )
+)]
+async fn backup_space(
+    PathExtractor(space_name): PathExtractor<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"subsd\""),
+            )],
+            Json(serde_json::json!({ "error": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    if !is_safe_space_name(&space_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid space_name".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let space_dir = Path::new(&state.config.data_dir).join(&space_name);
+    if !space_dir.is_dir() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Space not found: {}", space_name),
+            }),
+        )
+            .into_response();
+    }
+
+    let date = Local::now().format("%Y%m%d");
+    let archive_name = format!("{}_{}.tar", date, space_name);
+    let backups_dir = spaces_backups_dir(&state.config.data_dir);
+    if let Err(e) = fs::create_dir_all(&backups_dir) {
+        error!("Failed to create backups directory {}: {}", backups_dir.display(), e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to create backups directory: {}", e),
+            }),
+        )
+            .into_response();
+    }
+    let archive_path = backups_dir.join(&archive_name);
+
+    let tmp_name = format!(
+        "subsd_backup_{}_{}.tar",
+        space_name,
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let tmp_path = std::env::temp_dir().join(tmp_name);
+
+    let tar_status = match tokio::process::Command::new("tar")
+        .arg("-cf")
+        .arg(&tmp_path)
+        .arg("-C")
+        .arg(&space_dir)
+        .arg(".")
+        .status()
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to run tar: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to run tar: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if !tar_status.success() {
+        let _ = fs::remove_file(&tmp_path);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "'tar -cf' failed".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = tokio::fs::copy(&tmp_path, &archive_path).await {
+        error!("Failed to copy archive to {}: {}", archive_path.display(), e);
+        let _ = fs::remove_file(&tmp_path);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to save archive: {}", e),
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = fs::remove_file(&tmp_path) {
+        warn!("Failed to remove temp tar {}: {}", tmp_path.display(), e);
+    }
+
+    let body = match tokio::fs::read(&archive_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Failed to read archive {}: {}", archive_path.display(), e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read archive: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    info!(
+        "Backup created: {} ({} bytes)",
+        archive_path.display(),
+        body.len()
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-tar")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", archive_name),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap()
+        .into_response()
+}
+
+/// Save upload to `data/spaces_backups/`, then untar into `{SUBSD_DATA_DIR}/{space_name}` (created if needed). Basic Auth.
+#[utoipa::path(
+    post,
+    path = "/spaces/{space_name}/restore",
+    tag = "spaces",
+    params(
+        ("space_name" = String, Path, description = "Space folder name")
+    ),
+    request_body(content = String, description = "multipart/form-data with field file=tar archive", content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "Restored"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "tar or IO error")
+    ),
+    security(
+        ("basic" = [])
+    )
+)]
+async fn restore_space(
+    PathExtractor(space_name): PathExtractor<String>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"subsd\""),
+            )],
+            Json(serde_json::json!({ "error": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    if !is_safe_space_name(&space_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid space_name".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let space_dir = Path::new(&state.config.data_dir).join(&space_name);
+    if let Err(e) = fs::create_dir_all(&space_dir) {
+        error!("Failed to create space directory {}: {}", space_dir.display(), e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to create space directory: {}", e),
+            }),
+        )
+            .into_response();
+    }
+
+    let backups_dir = spaces_backups_dir(&state.config.data_dir);
+    if let Err(e) = fs::create_dir_all(&backups_dir) {
+        error!("Failed to create backups directory {}: {}", backups_dir.display(), e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to create backups directory: {}", e),
+            }),
+        )
+            .into_response();
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let saved_name = format!("restore_{}_{}.tar", space_name, nanos);
+    let saved_path = backups_dir.join(&saved_name);
+
+    let mut saved = false;
+    let mut err = String::new();
+
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        let name = field.name().unwrap_or("").to_string();
+        if name != "file" && !name.is_empty() {
+            continue;
+        }
+        if name.is_empty() && field.file_name().is_none() {
+            continue;
+        }
+
+        let data = match field.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                err = format!("Failed to read upload: {}", e);
+                break;
+            }
+        };
+
+        if data.is_empty() {
+            err = "Empty file".to_string();
+            break;
+        }
+
+        if let Err(e) = tokio::fs::write(&saved_path, &data).await {
+            err = format!("Failed to write archive under spaces_backups: {}", e);
+            break;
+        }
+        saved = true;
+        break;
+    }
+
+    if !err.is_empty() {
+        let _ = fs::remove_file(&saved_path);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: err }),
+        )
+            .into_response();
+    }
+
+    if !saved {
+        let _ = fs::remove_file(&saved_path);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No file uploaded (use form field name \"file\")".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let xf = tokio::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&saved_path)
+        .arg("-C")
+        .arg(&space_dir)
+        .status()
+        .await;
+
+    match xf {
+        Ok(s) if s.success() => {
+            info!(
+                "Restored from {} into {}",
+                saved_path.display(),
+                space_dir.display()
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "message": "Archive saved under spaces_backups and extracted into space directory",
+                    "space": space_name,
+                    "path": space_dir.to_string_lossy().to_string(),
+                    "archive_path": saved_path.to_string_lossy().to_string()
+                })),
+            )
+                .into_response()
+        }
+        Ok(s) => {
+            let _ = fs::remove_file(&saved_path);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("tar extract failed (status: {})", s),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&saved_path);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to run tar: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn list_spaces(state: State<AppState>) -> impl IntoResponse {
@@ -563,6 +1026,34 @@ async fn discover_endpoints(
             example_path: Some("/spaces/bitcoin2026/test/cert.json".to_string()),
         },
         EndpointInfo {
+            path: "/spaces/{space_name}/backup".to_string(),
+            method: "GET".to_string(),
+            description: "Basic Auth: create YYYYMMDD_{space_name}.tar from the space directory contents, save under data/spaces_backups (sibling of spaces), return the archive as download".to_string(),
+            path_params: vec![ParamInfo {
+                name: "space_name".to_string(),
+                param_type: "string".to_string(),
+                required: true,
+                description: "Space folder name under the data directory".to_string(),
+            }],
+            query_params: vec![],
+            response_formats: vec!["application/x-tar".to_string()],
+            example_path: Some("/spaces/bitcoin2026/backup".to_string()),
+        },
+        EndpointInfo {
+            path: "/spaces/{space_name}/restore".to_string(),
+            method: "POST".to_string(),
+            description: "Basic Auth: multipart upload (field file); save archive under data/spaces_backups then extract into data/spaces/{space_name} (directory created if needed)".to_string(),
+            path_params: vec![ParamInfo {
+                name: "space_name".to_string(),
+                param_type: "string".to_string(),
+                required: true,
+                description: "Space folder name under the data directory".to_string(),
+            }],
+            query_params: vec![],
+            response_formats: vec!["json".to_string()],
+            example_path: Some("/spaces/bitcoin2026/restore".to_string()),
+        },
+        EndpointInfo {
             path: "/spaces/{space_name}/{subspace}".to_string(),
             method: "GET".to_string(),
             description: "Get certificate information for a subspace, including handle, script_pubkey, anchor, anchor status comparison, and on-chain commitment verification".to_string(),
@@ -602,6 +1093,15 @@ async fn discover_endpoints(
             }],
             response_formats: vec!["html".to_string(), "json".to_string()],
             example_path: Some("/api".to_string()),
+        },
+        EndpointInfo {
+            path: "/api/spaces/find-handles".to_string(),
+            method: "POST".to_string(),
+            description: "Anonymous lookup: POST JSON body `{\"script_pubkeys\":[\"...\"]}` returns matching `{handle, script_pubkey}` rows from data/scanned-pubkeys.csv (same logic as find-handles script)".to_string(),
+            path_params: vec![],
+            query_params: vec![],
+            response_formats: vec!["json".to_string()],
+            example_path: Some("/api/spaces/find-handles".to_string()),
         },
     ];
 
@@ -2492,6 +2992,7 @@ async fn issue_cert(
         (status = 200, description = "File uploaded and processed successfully"),
         (status = 400, description = "Bad request"),
         (status = 401, description = "Unauthorized"),
+        (status = 409, description = "Certificate request file already exists"),
         (status = 500, description = "Internal server error")
     ),
     security(
@@ -2572,6 +3073,16 @@ async fn upload_req_file(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "error": format!("Failed to create space directory: {}", e)
+            })),
+        )
+            .into_response();
+    }
+
+    if req_file_path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Certificate request file already exists: {}", req_file_name)
             })),
         )
             .into_response();
@@ -2700,6 +3211,7 @@ async fn upload_req_file(
         (status = 200, description = "File uploaded successfully"),
         (status = 400, description = "Bad request"),
         (status = 401, description = "Unauthorized"),
+        (status = 409, description = "Certificate request file already exists"),
         (status = 500, description = "Internal server error")
     ),
     security(
@@ -2810,6 +3322,16 @@ async fn upload_space_req_file(
 
             // Save the file
             let req_file_path = space_dir.join(&filename);
+            if req_file_path.exists() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Certificate request file already exists: {}", filename)
+                    })),
+                )
+                    .into_response();
+            }
             if let Err(e) = fs::write(&req_file_path, &json_content) {
                 error!("Failed to write req file {}: {}", req_file_path.display(), e);
                 error_message = format!("Failed to save file: {}", e);
@@ -2957,6 +3479,7 @@ async fn upload_space_req_file(
     responses(
         (status = 200, description = "File saved and subs add completed"),
         (status = 400, description = "Bad request"),
+        (status = 409, description = "Certificate request file already exists"),
         (status = 500, description = "Internal server error")
     )
 )]
@@ -3017,6 +3540,18 @@ async fn add_space_req_json(
             .into_response();
     }
 
+    let req_file_path = space_dir.join(&filename);
+    if req_file_path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Certificate request file already exists: {}", filename)
+            })),
+        )
+            .into_response();
+    }
+
     let json_content = match serde_json::to_string_pretty(&body) {
         Ok(s) => s,
         Err(e) => {
@@ -3031,7 +3566,6 @@ async fn add_space_req_json(
         }
     };
 
-    let req_file_path = space_dir.join(&filename);
     if let Err(e) = fs::write(&req_file_path, &json_content) {
         error!("Failed to write req file {}: {}", req_file_path.display(), e);
         return (
@@ -3949,11 +4483,14 @@ async fn main() -> Result<()> {
         .route("/spaces/", get(get_app_config))
         .route("/health", get(healthcheck))
         .route("/api", get(discover_endpoints))
+        .route("/api/spaces/find-handles", post(api_find_handles))
         .route("/spaces/:space_name", get(get_space_info))
         .route("/spaces/:space_name/cert", get(download_root_cert))
         .route("/spaces/:space_name/req", post(upload_space_req_file))
         .route("/spaces/:space_name/add", post(add_space_req_json))
         .route("/spaces/:space_name/prove", post(prove_space))
+        .route("/spaces/:space_name/backup", get(backup_space))
+        .route("/spaces/:space_name/restore", post(restore_space))
         .route("/spaces/:space_name/:subspace", get(get_subspace_cert))
         .route("/spaces/:space_name/:subspace/cert.json", get(download_cert_json))
         .route("/spaces/:space_name/:subspace/cert", get(download_cert))
@@ -3965,6 +4502,7 @@ async fn main() -> Result<()> {
         .route("/api/spaces/:space_name/callbacks/:callback_id", delete(unregister_cert_callback))
         .route("/api/spaces/:space_name/callbacks/:callback_id/watches", put(update_cert_watches))
         .route("/jobs/:job_id", get(get_job_status))
+        .layer(CorsLayer::permissive())
         .with_state(app_state);
 
     // Create the server address

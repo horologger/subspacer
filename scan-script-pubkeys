@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Scans data/spaces/**/**.req.json and appends handle,script_pubkey lines to
+# data/scanned-pubkeys.csv (no duplicate lines). Requires jq.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPACES_DIR="$ROOT/data/spaces"
+OUTFILE="$ROOT/data/scanned-pubkeys.csv"
+
+if ! command -v jq &>/dev/null; then
+  echo "scan-script-pubkeys: jq is required" >&2
+  exit 1
+fi
+
+mkdir -p "$ROOT/data"
+touch "$OUTFILE"
+
+if [[ ! -d "$SPACES_DIR" ]]; then
+  echo "scan-script-pubkeys: missing directory: $SPACES_DIR" >&2
+  exit 1
+fi
+
+while IFS= read -r -d '' f; do
+  line="$(jq -r '"\(.handle),\(.script_pubkey)"' "$f")"
+  if ! grep -Fxq "$line" "$OUTFILE" 2>/dev/null; then
+    echo "$line" >> "$OUTFILE"
+  fi
+done < <(find "$SPACES_DIR" -type f -name '*.req.json' -print0 | sort -z)
+
+echo "Updated $OUTFILE"

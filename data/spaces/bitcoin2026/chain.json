@@ -34,8 +34,8 @@
       "post_diff_root": "11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a",
       "diff_file": "000003_11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a.diff.bin",
       "subtree_file": "000003_11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a.subtree.bin",
-      "step_receipt": null,
-      "aggregate_receipt": null,
+      "step_receipt": "000002_11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a.step.zk.bin",
+      "aggregate_receipt": "000002_11713529aeb94f99708002ec10a86385341e466c8e9be0c259e6bf41ba97c46a.fold.zk.bin",
       "aggregate_groth16": null
     },
     {
@@ -43,8 +43,8 @@
       "post_diff_root": "02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a",
       "diff_file": "000004_02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a.diff.bin",
       "subtree_file": "000004_02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a.subtree.bin",
-      "step_receipt": null,
-      "aggregate_receipt": null,
+      "step_receipt": "000003_02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a.step.zk.bin",
+      "aggregate_receipt": "000003_02091cc290ceec4950398f06872c13eee90a6a2f89e223848400ae038d43bd1a.fold.zk.bin",
       "aggregate_groth16": null
     },
     {
@@ -52,11 +52,20 @@
       "post_diff_root": "ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22",
       "diff_file": "000005_ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22.diff.bin",
       "subtree_file": "000005_ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22.subtree.bin",
-      "step_receipt": null,
-      "aggregate_receipt": null,
+      "step_receipt": "000004_ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22.step.zk.bin",
+      "aggregate_receipt": "000004_ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22.fold.zk.bin",
+      "aggregate_groth16": null
+    },
+    {
+      "pre_diff_root": "ac5962b8bf413bf4b0aa85f2ae8af71d248ce22ab3aa9863c32c13f777a4cd22",
+      "post_diff_root": "c03e346fcc98ea605477005800b74f8b05b817867f6ae78948be405602cd2cea",
+      "diff_file": "000006_c03e346fcc98ea605477005800b74f8b05b817867f6ae78948be405602cd2cea.diff.bin",
+      "subtree_file": "000006_c03e346fcc98ea605477005800b74f8b05b817867f6ae78948be405602cd2cea.subtree.bin",
+      "step_receipt": "000005_c03e346fcc98ea605477005800b74f8b05b817867f6ae78948be405602cd2cea.step.zk.bin",
+      "aggregate_receipt": "000005_c03e346fcc98ea605477005800b74f8b05b817867f6ae78948be405602cd2cea.fold.zk.bin",
       "aggregate_groth16": null
     }
   ],
-  "tip_receipt": "000001_2c8046787379835d0c6367af5b2af693bc6029b28d927bc1ebe96616a96e8c8c.fold.zk.bin",
+  "tip_receipt": "000005_c03e346fcc98ea605477005800b74f8b05b817867f6ae78948be405602cd2cea.fold.zk.bin",
   "tip_receipt_groth16": null
 }
