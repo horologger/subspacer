@@ -4,18 +4,26 @@
 
 The Certificate Callback API allows external clients to register webhooks that receive notifications when certificate lifecycle events occur in a space. Callbacks are registered per space and can watch specific subspaces or all subspaces.
 
+**Important:** Webhooks are delivered by **`subsd`**. Operations that do not go through `subsd` (for example running `subs cert issue` or `subs prove` in your shell against the data directory) **do not** trigger callbacks, because `subsd` is never involved in those commands.
+
 ## Authentication
 
-All callback management endpoints require Basic Authentication using the credentials configured in `SUBSD_RPC_USER` and `SUBSD_RPC_PASSWORD`.
+**Callback management** — register, list, get, update watches, delete — requires HTTP Basic authentication using `SUBSD_RPC_USER` and `SUBSD_RPC_PASSWORD`.
+
+**Space operations** that change data or start work (`POST` issue, request upload, `POST` prove, backup/restore, etc.) use the same credentials. `GET /jobs/{job_id}` (job status) is **unauthenticated** in the current server.
 
 ## Event Types
 
-The following events trigger callbacks:
+The following events are emitted by `subsd` when the corresponding HTTP flow succeeds:
 
-1. **`certificate_issued`** - When a certificate is successfully issued via `subs cert issue`
-2. **`request_uploaded`** - When a certificate request file (`.req.json`) is uploaded
-3. **`request_added`** - When `subs add .` successfully processes a request
-4. **`prove_completed`** - When a prove job completes successfully
+| Event | Trigger (must use `subsd` HTTP API) |
+|--------|--------------------------------------|
+| **`certificate_issued`** | `POST /spaces/{space_name}/{subspace}/issue` — `subsd` runs `subs cert issue` and then notifies. A local `subs cert issue` in the shell does **not** fire this event. |
+| **`request_uploaded`** | `POST` to a request-upload route (e.g. `/spaces/{space}/{subspace}/req` with body, or other `subsd` upload handlers) after the `.req.json` is written. |
+| **`request_added`** | After the same upload path runs `subs add .` successfully. |
+| **`prove_completed`** | `POST /spaces/{space_name}/prove` — asynchronous prove job finishes successfully. Optional body `{"force": true}` runs **`subs prove`** even when **`subs commit`** has nothing to do (see [Prove jobs (HTTP API)](#prove-jobs-http-api)). See [Watch filtering](#watch-filtering). |
+
+Base URL in examples is `http://127.0.0.1:7244` (or your `SUBSD_RPC_URL`). Paths are shown without an `/api` prefix except for callback **registration** routes under `/api/spaces/...`.
 
 ## Endpoints
 
@@ -165,6 +173,66 @@ curl -X DELETE http://127.0.0.1:7244/api/spaces/tabconf/callbacks/tabconf_123456
 }
 ```
 
+## Prove jobs (HTTP API)
+
+To run `subs commit` and `subs prove` in a space **through** `subsd` (so the `prove_completed` callback can run and the job `result` includes a parsed chain tip):
+
+1. **Start a job** — requires Basic auth (`SUBSD_RPC_USER` / `SUBSD_RPC_PASSWORD`):
+
+   **`POST /spaces/{space_name}/prove`**
+
+   **Optional body** (empty body or `{}` is valid), JSON:
+   - **`force` (boolean, default `false`)** — If `true`, a failed **`subs commit`** that is *only* due to nothing to commit (messages such as *No changes to commit* or *no uncommitted changes found* from `subs`) does **not** stop the job: `subsd` records the commit step as `skipped` and still runs **`subs prove`**. Any other commit failure (e.g. spawn error) still fails the job. If `false` (default) or omitted, a no-op commit causes the job to end in `failed` and **`subs prove`** is not run.
+
+   **Response (immediate):**
+   ```json
+   {
+     "job_id": "tabconf_1234567890",
+     "status": "pending",
+     "created_at": 1234567890
+   }
+   ```
+
+   The immediate response does **not** include the new chain anchor. When the job finishes, `result` and `prove_completed`’s `event_data` include **`anchor`** (chain tip) and **`force`** (boolean: `true` if commit was skipped and prove ran only because the request set `"force": true` and commit had no work).
+
+2. **Poll for completion:**
+
+   **`GET /jobs/{job_id}`** (no Basic auth in the current server)
+
+   When the job ends, `status` is `completed` or `failed`. `result` includes `steps`, `anchor` (best-effort from `chain.json`), and `force` (see start-a-job body above; `false` on commit failure with no `force` resume). On failure, `error` is set. Example for a successful run:
+
+   ```json
+   {
+     "job_id": "tabconf_1234567890",
+     "status": "completed",
+     "created_at": 1234567890,
+     "completed_at": 1234567891,
+     "result": {
+       "steps": [ ... ],
+       "anchor": "4c41e6a059483b20ea8fb65089a11315a46d07f6d2f6edf7960acec376c02327",
+       "force": false
+     },
+     "error": null
+   }
+   ```
+
+   - **`result.anchor`**: `post_diff_root` of the last entry in `{data_dir}/{space_name}/chain.json` at the end of the job (hex), or `null` if not available. Same as `event_data.anchor` in the `prove_completed` webhook.
+   - **`result.force`**: `true` only if the run skipped a no-op commit and continued to prove because the client sent `"force": true`. Otherwise `false` (including failed jobs where commit did not use this path).
+
+3. **Examples:**
+   ```bash
+   # Default: require subs commit to succeed (or job fails on “no changes to commit”)
+   curl -sS -u "$SUBSD_RPC_USER:$SUBSD_RPC_PASSWORD" \
+     -X POST "http://127.0.0.1:7244/spaces/tabconf/prove"
+   ```
+   ```bash
+   # Run subs prove even when there is nothing to commit
+   curl -sS -u "$SUBSD_RPC_USER:$SUBSD_RPC_PASSWORD" \
+     -X POST "http://127.0.0.1:7244/spaces/tabconf/prove" \
+     -H "Content-Type: application/json" \
+     -d '{"force": true}'
+   ```
+
 ## Callback Payload Format
 
 When an event occurs, the server sends a POST request to the registered callback URL with the following payload structure:
@@ -184,7 +252,7 @@ When an event occurs, the server sends a POST request to the registered callback
 
 ### Certificate Issued Event
 
-Triggered when a certificate is successfully issued.
+Triggered when a certificate is successfully issued **by `subsd`** through **`POST /spaces/{space_name}/{subspace}/issue`**. If you only run `subs cert issue` in the terminal, `subsd` does not see it and this event is **not** sent.
 
 **Payload:**
 ```json
@@ -203,7 +271,7 @@ Triggered when a certificate is successfully issued.
 
 ### Request Uploaded Event
 
-Triggered when a certificate request file is uploaded.
+Triggered when a certificate request file is uploaded through **`subsd`** (e.g. the multipart or JSON upload route for that subspace’s `.req.json`).
 
 **Payload:**
 ```json
@@ -221,7 +289,7 @@ Triggered when a certificate request file is uploaded.
 
 ### Request Added Event
 
-Triggered when `subs add .` successfully processes a request.
+Triggered when **`subsd`** runs `subs add .` successfully after an upload (same upload flow that wrote the request file).
 
 **Payload:**
 ```json
@@ -242,6 +310,8 @@ Triggered when `subs add .` successfully processes a request.
 
 Triggered when a prove job completes successfully. Note: `subspace` will be `null` for this event as it's space-level.
 
+`event_data.anchor` is the current chain tip: the `post_diff_root` of the last entry in the space’s `chain.json` after the job (hex string), or `null` if the file is missing or has no entries. **`event_data.force`** is `true` if the commit step was skipped (no changes) and the job used **`"force": true`** on `POST /prove` so that **`subs prove`** still ran; otherwise `false`.
+
 **Payload:**
 ```json
 {
@@ -252,6 +322,8 @@ Triggered when a prove job completes successfully. Note: `subspace` will be `nul
   "timestamp": 1234567890,
   "event_data": {
     "job_id": "tabconf_1234567890",
+    "anchor": "4c41e6a059483b20ea8fb65089a11315a46d07f6d2f6edf7960acec376c02327",
+    "force": false,
     "steps": [
       {
         "command": "subs commit",
@@ -268,12 +340,18 @@ Triggered when a prove job completes successfully. Note: `subspace` will be `nul
 }
 ```
 
+When commit was skipped due to `force: true` on the request, the first step often looks like `"status": "skipped"` with a `"note"` instead of a successful commit step.
+
+See [Prove jobs (HTTP API)](#prove-jobs-http-api). `GET /jobs/{job_id}` returns the same `anchor`, `force`, and `steps` under `result` when the job has finished (success or failure; `anchor` is read from `chain.json` when possible).
+
 ## Watch Filtering
 
 Callbacks can watch specific subspaces or all subspaces:
 
 - **Specific subspaces**: Set `watched_subnames` to an array of subspace names (e.g., `["alice", "bob"]`)
 - **All subspaces**: Set `watched_subnames` to an empty array `[]`
+
+**`prove_completed` is space-level:** the outer payload has `subspace: null` and `handle: null`. The server only delivers `prove_completed` to registrations whose filter matches a “no subspace” event — in practice, **only** callbacks with **`watched_subnames: []` (watch all)** receive it. A callback restricted to e.g. `["alice"]` will **not** get `prove_completed`, because that event is not tied to a single subname.
 
 **Example: Watch all subspaces**
 ```bash
@@ -339,8 +417,10 @@ def handle_certificate_callback():
         
     elif event_type == 'prove_completed':
         job_id = event_data.get('job_id')
+        anchor = event_data.get('anchor')  # chain tip post_diff_root, or None
+        force = event_data.get('force', False)  # True if commit was skipped, prove ran with force
         steps = event_data.get('steps')
-        logging.info(f"Prove completed for job {job_id}")
+        logging.info(f"Prove completed for job {job_id} anchor={anchor} force={force}")
         # Process prove completion...
     
     return jsonify({'status': 'ok'}), 200
@@ -369,19 +449,27 @@ curl -X POST http://127.0.0.1:7244/spaces/tabconf/req \
   -F "file=@alice@tabconf.req.json"
 ```
 
-3. **Issue a certificate** (triggers `certificate_issued` callback):
+3. **Issue a certificate** (triggers `certificate_issued` only when issued **via** `subsd`):
 ```bash
 curl -X POST http://127.0.0.1:7244/spaces/tabconf/alice/issue \
   -u subsdadmin:OtherRisk84
 ```
 
-4. **Check registered callbacks:**
+4. **Start a prove job** (optional). `prove_completed` is only sent to callbacks registered with **`watched_subnames: []`** (watch all), not to a per-subname list like `["alice"]` — register a second callback with an empty list if you need this event alongside scoped cert webhooks.
+```bash
+curl -sS -X POST http://127.0.0.1:7244/spaces/tabconf/prove \
+  -u subsdadmin:OtherRisk84
+# Then poll: GET http://127.0.0.1:7244/jobs/{job_id}
+# If the batch is empty and you still need subs prove, use: -H "Content-Type: application/json" -d '{"force": true}'
+```
+
+5. **Check registered callbacks:**
 ```bash
 curl -X GET http://127.0.0.1:7244/api/spaces/tabconf/callbacks \
   -u subsdadmin:OtherRisk84
 ```
 
-5. **Unregister when done:**
+6. **Unregister when done:**
 ```bash
 curl -X DELETE http://127.0.0.1:7244/api/spaces/tabconf/callbacks/tabconf_1234567890 \
   -u subsdadmin:OtherRisk84

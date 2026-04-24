@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use anyhow::{Context, Result};
 use axum::{
+    body::Bytes,
     extract::{Path as PathExtractor, State, Query, Multipart},
     http::{header, StatusCode, HeaderMap, HeaderValue},
     response::{Html, Json, IntoResponse, Response},
@@ -296,6 +297,7 @@ struct HandlePubkeyMatch {
         JobResponse,
         JobStatusResponse,
         JobStatus,
+        ProveSpaceRequest,
         CallbackRegistration,
         RegisterCallbackRequest,
         UpdateWatchesRequest,
@@ -316,6 +318,14 @@ struct HandlePubkeyMatch {
     )
 )]
 struct ApiDoc;
+
+/// Optional body for `POST /spaces/{space}/prove`.
+#[derive(Deserialize, Debug, Default, ToSchema)]
+struct ProveSpaceRequest {
+    /// If true, `subs commit` may be skipped when it would fail with *no changes to commit*; the job still runs `subs prove`.
+    #[serde(default)]
+    force: bool,
+}
 
 #[utoipa::path(
     get,
@@ -2498,6 +2508,25 @@ fn load_all_callbacks(data_dir: &str) -> HashMap<String, Vec<CallbackRegistratio
     callbacks_map
 }
 
+/// Reads `chain.json` in `space_dir` and returns the last entry's `post_diff_root` (current chain tip / space anchor).
+fn parse_chain_tip_anchor(space_dir: &Path) -> Option<String> {
+    let path = space_dir.join("chain.json");
+    let s = fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    v.get("entries")?
+        .as_array()?
+        .last()?
+        .get("post_diff_root")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// True if `subs commit` failed only because there is nothing to commit (matches `subs` error text).
+fn commit_failed_no_changes_to_commit(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("no changes to commit") || e.contains("no uncommitted changes found")
+}
+
 /// Check if a callback should be triggered for a subspace
 fn should_trigger_callback(callback: &CallbackRegistration, subspace: Option<&str>) -> bool {
     // Empty watched_subnames means watch all subspaces
@@ -3686,6 +3715,7 @@ async fn execute_prove_job(
     space_dir: std::path::PathBuf,
     jobs: JobStore,
     callbacks: CallbackStore,
+    force: bool,
 ) {
     // Update job status to Processing
     {
@@ -3697,6 +3727,7 @@ async fn execute_prove_job(
 
     let mut results = Vec::new();
     let mut error_message = None;
+    let mut force_applied = false;
 
     // Step 1: subs commit
     info!("Job {}: Executing 'subs commit' for space {}", job_id, space_name);
@@ -3732,18 +3763,39 @@ async fn execute_prove_job(
         }
     }
 
+    if force && error_message.as_ref().map_or(false, |m| commit_failed_no_changes_to_commit(m)) {
+        error_message = None;
+        force_applied = true;
+        if !results.is_empty() {
+            results[0] = serde_json::json!({
+                "command": "subs commit",
+                "status": "skipped",
+                "note": "No changes to commit; continuing to subs prove (request had force: true)"
+            });
+        }
+        info!(
+            "Job {}: commit had no changes; continuing to prove due to force",
+            job_id
+        );
+    }
+
     // If commit failed, mark job as failed
     if error_message.is_some() {
         let completed_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let anchor = parse_chain_tip_anchor(&space_dir);
         let mut jobs_map = jobs.lock().await;
         if let Some(job) = jobs_map.get_mut(&job_id) {
             job.status = JobStatus::Failed(error_message.clone().unwrap());
             job.completed_at = Some(completed_at);
             job.error = error_message;
-            job.result = Some(serde_json::json!({ "steps": results }));
+            job.result = Some(serde_json::json!({
+                "steps": results,
+                "anchor": anchor,
+                "force": false,
+            }));
         }
         return;
     }
@@ -3789,6 +3841,8 @@ async fn execute_prove_job(
         "note": "To be implemented"
     }));
 
+    let anchor = parse_chain_tip_anchor(&space_dir);
+
     // Update job status
     let completed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3805,7 +3859,11 @@ async fn execute_prove_job(
             job.status = JobStatus::Completed;
         }
         job.completed_at = Some(completed_at);
-        job.result = Some(serde_json::json!({ "steps": results }));
+        job.result = Some(serde_json::json!({
+            "steps": results,
+            "anchor": anchor,
+            "force": force_applied,
+        }));
         completed
     } else {
         false
@@ -3818,6 +3876,8 @@ async fn execute_prove_job(
         let space_name_clone = space_name.clone();
         let job_id_clone = job_id.clone();
         let results_clone = results.clone();
+        let anchor_clone = anchor.clone();
+        let force_applied_cb = force_applied;
         tokio::spawn(async move {
             trigger_callbacks(
                 callbacks_clone,
@@ -3827,6 +3887,8 @@ async fn execute_prove_job(
                 serde_json::json!({
                     "job_id": job_id_clone,
                     "steps": results_clone,
+                    "anchor": anchor_clone,
+                    "force": force_applied_cb,
                 }),
             )
             .await;
@@ -3843,8 +3905,10 @@ async fn execute_prove_job(
     params(
         ("space_name" = String, Path, description = "Name of the space")
     ),
+    request_body = inline(ProveSpaceRequest),
     responses(
         (status = 200, description = "Job created", body = JobResponse),
+        (status = 400, description = "Invalid JSON body"),
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "Space not found"),
         (status = 500, description = "Internal server error")
@@ -3857,6 +3921,7 @@ async fn prove_space(
     PathExtractor(space_name): PathExtractor<String>,
     headers: HeaderMap,
     State(state): State<AppState>,
+    body: Bytes,
 ) -> impl IntoResponse {
     // Verify Basic Auth
     if !verify_basic_auth(&headers, &state.config.rpc_user, &state.config.rpc_password) {
@@ -3884,6 +3949,23 @@ async fn prove_space(
         )
             .into_response();
     }
+
+    let prove_opts: ProveSpaceRequest = if body.is_empty() {
+        ProveSpaceRequest::default()
+    } else {
+        match serde_json::from_slice::<ProveSpaceRequest>(&body) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("Invalid JSON body: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
 
     // Generate job ID
     let job_id = generate_job_id(&space_name);
@@ -3915,8 +3997,9 @@ async fn prove_space(
     let jobs_clone = state.jobs.clone();
     let callbacks_clone = state.callbacks.clone();
     let job_id_clone = job_id.clone();
+    let force = prove_opts.force;
     tokio::spawn(async move {
-        execute_prove_job(job_id_clone, space_name, space_dir, jobs_clone, callbacks_clone).await;
+        execute_prove_job(job_id_clone, space_name, space_dir, jobs_clone, callbacks_clone, force).await;
     });
 
     // Return job response
